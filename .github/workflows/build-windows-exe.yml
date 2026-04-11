@@ -5,6 +5,8 @@ on:
   push:
     paths:
       - "*.py"
+      - "src/**"
+      - "tests/**"
       - "*.spec"
       - "requirements*.txt"
       - "build_windows.bat"

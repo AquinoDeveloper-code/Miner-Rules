@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from src.entrypoints.main import main
+from src.entrypoints.admin import main
 
 
 if __name__ == "__main__":

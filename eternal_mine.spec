@@ -2,8 +2,8 @@
 
 
 a = Analysis(
-    ["main.py"],
-    pathex=[],
+    ["src/entrypoints/main.py"],
+    pathex=["."],
     binaries=[],
     datas=[],
     hiddenimports=[],

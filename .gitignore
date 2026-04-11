@@ -15,6 +15,7 @@ build-macos/
 dist-macos/
 
 save_eternal_mine.json
+save_eternal_mine.db
 
 .pytest_cache/
 .mypy_cache/

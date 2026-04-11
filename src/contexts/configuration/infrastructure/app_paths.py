@@ -7,6 +7,8 @@ from pathlib import Path
 
 APP_DIR_NAME = "MinaDosEscravosEternos"
 SAVE_FILE_NAME = "save_eternal_mine.json"
+DATABASE_FILE_NAME = "save_eternal_mine.db"
+RULES_FILE_NAME = "game_rules.json"
 
 
 def _user_data_root() -> Path:
@@ -32,9 +34,38 @@ def get_app_data_dir() -> Path:
 
 
 def get_save_path() -> Path:
+    return get_app_data_dir() / DATABASE_FILE_NAME
+
+
+def get_rules_path() -> Path:
+    return get_app_data_dir() / RULES_FILE_NAME
+
+
+def get_app_legacy_save_path() -> Path:
     return get_app_data_dir() / SAVE_FILE_NAME
 
 
 def get_legacy_save_path(base_dir: str | Path | None = None) -> Path:
     base = Path(base_dir) if base_dir is not None else Path.cwd()
     return base / SAVE_FILE_NAME
+
+
+def iter_legacy_save_paths(base_dir: str | Path | None = None) -> list[Path]:
+    return [get_app_legacy_save_path(), get_legacy_save_path(base_dir)]
+
+
+def delete_save_files(base_dir: str | Path | None = None) -> list[Path]:
+    removed: list[Path] = []
+    seen: set[Path] = set()
+
+    for path in (get_save_path(), *iter_legacy_save_paths(base_dir)):
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+
+        if path.exists():
+            path.unlink()
+            removed.append(path)
+
+    return removed
