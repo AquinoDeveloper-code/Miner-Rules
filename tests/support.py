@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from game_rules import DEFAULT_RULES, save_rules
-from slave import Escravo
+from src.contexts.configuration.application.game_rules import DEFAULT_RULES, save_rules
+from src.contexts.gameplay.domain.slave import Escravo
 
 
 def make_rules(**overrides):

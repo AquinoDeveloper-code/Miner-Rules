@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from constants import ITEMS, MAX_AGE
-from slave import Escravo
+from src.contexts.gameplay.domain.slave import Escravo
+from src.contexts.shared.constants import ITEMS, MAX_AGE
 from tests.support import TempHomeTestCase, make_servo
 
 

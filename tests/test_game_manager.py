@@ -3,8 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from unittest.mock import patch
 
-from constants import MINE_DEPTHS, PRESTIGE_BONUS_STEP
-from game_manager import GameManager
+from src.contexts.gameplay.application.game_manager import GameManager
+from src.contexts.shared.constants import MINE_DEPTHS, PRESTIGE_BONUS_STEP
 from tests.support import TempHomeTestCase, make_servo
 
 

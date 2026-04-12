@@ -3,9 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import app_paths
-from app_paths import delete_save_files, get_app_data_dir, get_legacy_save_path, get_rules_path, get_save_path
-from game_rules import DEFAULT_RULES, load_rules, normalize_rules, save_rules
+from src.contexts.configuration.application.game_rules import DEFAULT_RULES, load_rules, normalize_rules, save_rules
+from src.contexts.configuration.infrastructure import app_paths
+from src.contexts.configuration.infrastructure.app_paths import (
+    delete_save_files,
+    get_app_data_dir,
+    get_legacy_save_path,
+    get_rules_path,
+    get_save_path,
+)
 from tests.support import TempHomeTestCase, make_rules
 
 

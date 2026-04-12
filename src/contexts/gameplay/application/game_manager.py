@@ -14,6 +14,8 @@ from src.contexts.configuration.infrastructure.app_paths import (
     iter_legacy_save_paths,
 )
 from src.contexts.gameplay.domain.slave import Escravo
+from src.contexts.gameplay.domain.guard import Delivery, Guarda
+from src.contexts.gameplay.domain.manager import Gerente
 from src.contexts.gameplay.infrastructure.sqlite_storage import SQLiteStorage
 from src.contexts.shared.constants import (
     RESOURCES, RESOURCE_ORDER, MINE_UPGRADES, UPGRADE_ORDER,
@@ -22,6 +24,10 @@ from src.contexts.shared.constants import (
     GREEN, RED, YELLOW, ORANGE, CYAN, GOLD, GRAY, PURPLE, WHITE,
     SLOTS, ITEMS, ITEM_DROP_CHANCES,
     RETIREMENT_AGE, MAX_AGE,
+    DELIVERY_BASE_TIME, DELIVERY_MIN_TIME, DELIVERY_ATTACK_RATE, DELIVERY_ATTACKS,
+    MAX_GUARDAS, GUARD_SLOTS, GUARD_TIERS, GUARD_ITEMS,
+    VENDOR_APPEAR_CHANCE, VENDOR_TIMER, VENDOR_ITEMS_COUNT, VENDOR_QUALITY_WEIGHTS,
+    MANAGER_TIERS, MANAGER_AUTONOMIA, MAX_GERENTES, MAX_RECOMENDACOES,
 )
 
 
@@ -110,6 +116,24 @@ class GameManager:
         # Loja de Itens Equips/Consumiveis
         self.loja_itens: list[dict] = []
         self.loja_itens_timer = 0.0
+
+        # Sistema de Guardas
+        self.guardas: list[Guarda] = []
+        self.inventario_guard_itens: list[str] = []
+        self.loja_guard_itens: list[dict] = []
+        self.loja_guard_itens_timer = 0.0
+
+        # Sistema de Entrega (Cofre)
+        self.entregas: list[Delivery] = []
+        self._last_agora_real: float = time.time()
+
+        # Vendedor Ambulante
+        self.vendedor_atual: dict | None = None
+
+        # Sistema de Gerentes
+        self.gerentes: list[Gerente] = []
+        self.fila_recomendacoes: list[dict] = []
+        self._t_gerentes: dict[int, float] = {}   # {gerente.id: timer_restante}
 
         # Estatísticas permanentes
         self.stats = {
@@ -223,9 +247,12 @@ class GameManager:
         idade_min = 16.0
         faixa_idade = max(1.0, float(MAX_AGE) - idade_min)
         progresso_idade = max(0.0, min(1.0, (escravo.idade - idade_min) / faixa_idade))
+        maior_risco_base = max(depth["risco_morte"] for depth in MINE_DEPTHS)
+        severidade_mina = min(1.0, self.risco_morte / max(0.0001, maior_risco_base))
 
-        fator_idade = 0.10 + progresso_idade * 3.40
-        return min(0.70, max(0.001, self.risco_morte * fator_idade))
+        risco_minimo = 0.001 + severidade_mina * 0.009
+        risco_maximo = 0.12 + severidade_mina * 0.58
+        return min(0.70, max(risco_minimo, risco_minimo + (risco_maximo - risco_minimo) * progresso_idade))
 
     @property
     def lealdade_media(self):
@@ -252,6 +279,11 @@ class GameManager:
         agora_real = time.time() (para autosave e eventos)
         """
         self.tempo_jogo += delta
+
+        # Delta real (independente da velocidade)
+        delta_real = agora_real - self._last_agora_real
+        self._last_agora_real = agora_real
+        delta_real = max(0.0, min(delta_real, 5.0))   # clamp anti-spike
 
         # Mercado negro timer
         if self.mercado_negro:
@@ -310,6 +342,28 @@ class GameManager:
             self.loja_itens_timer = 0.0
             self._gerar_loja_itens()
 
+        # Loja de Itens de Guardas (5 min de jogo)
+        self.loja_guard_itens_timer += delta
+        if self.loja_guard_itens_timer >= 300.0:
+            self.loja_guard_itens_timer = 0.0
+            self._gerar_loja_guard_itens()
+
+        # Sistema de Entrega (tempo real)
+        if not self.pausado:
+            self._update_deliveries(delta_real)
+
+        # Vendedor (tempo real)
+        if self.vendedor_atual:
+            self.vendedor_atual["timer"] -= delta_real
+            if self.vendedor_atual["timer"] <= 0 or not self.vendedor_atual["itens"]:
+                if self.vendedor_atual["itens"]:
+                    self.log_add("[VENDEDOR] O vendedor foi embora.", GRAY)
+                self.vendedor_atual = None
+
+        # Gerentes (tempo de jogo)
+        if self.gerentes:
+            self._update_gerentes(delta)
+
         # Autosave (tempo real)
         if agora_real - self._t_autosave >= self.rules["autosave_interval"]:
             self._t_autosave = agora_real
@@ -328,19 +382,111 @@ class GameManager:
     # MINERAÇÃO
     # ==============================================================
 
+    def _calcular_delivery_time(self, escravo: Escravo) -> float:
+        """Tempo de entrega em segundos reais: máx 15s, reduz com vel e nível da mina."""
+        vel_bonus   = (escravo.velocidade_efetiva() / 100) * 8.0
+        nivel_bonus = self.nivel_mina * 0.5
+        return max(DELIVERY_MIN_TIME, DELIVERY_BASE_TIME - vel_bonus - nivel_bonus)
+
+    def _calcular_ataque_chance(self) -> float:
+        """Chance de ataque por check, reduzida por guardas e segurança."""
+        base = DELIVERY_ATTACK_RATE
+        seg_lvl = self.upgrades.get("seguranca", 0)
+        seg_red = MINE_UPGRADES["seguranca"]["niveis"][seg_lvl]["red_morte"]
+        base *= (1.0 - seg_red * 0.5)
+        total_agi = sum(g.agilidade_efetiva() for g in self.guardas if g.ativo)
+        guard_red = min(0.60, total_agi / 400.0)
+        base *= (1.0 - guard_red)
+        return max(0.005, base)
+
+    def _calcular_recuperacao(self, tipo_ataque: str) -> float:
+        """Chance de recuperar itens após ataque, aumentada pelos guardas."""
+        base        = DELIVERY_ATTACKS[tipo_ataque]["recuperar"]
+        total_forca = sum(g.forca_efetiva() for g in self.guardas if g.ativo)
+        bonus       = min(0.35, total_forca / 300.0)
+        return min(0.97, base + bonus)
+
+    def _update_deliveries(self, delta_real: float):
+        """Atualiza entregas em trânsito. Chamado com delta de tempo real."""
+        for delivery in list(self.entregas):
+            if delivery.status != "transito":
+                continue
+
+            delivery.timer      -= delta_real
+            delivery._atk_check -= delta_real
+
+            # Verificação de ataque
+            if delivery._atk_check <= 0:
+                delivery._atk_check = 5.0
+                if random.random() < self._calcular_ataque_chance():
+                    # Sorteia tipo de ataque
+                    tipos  = list(DELIVERY_ATTACKS.keys())
+                    pesos  = [DELIVERY_ATTACKS[t]["chance"] for t in tipos]
+                    total  = sum(pesos)
+                    r      = random.random() * total
+                    acc    = 0.0
+                    tipo   = tipos[0]
+                    for t, p in zip(tipos, pesos):
+                        acc += p
+                        if r <= acc:
+                            tipo = t
+                            break
+
+                    ataque      = DELIVERY_ATTACKS[tipo]
+                    chance_rec  = self._calcular_recuperacao(tipo)
+                    recuperado  = random.random() < chance_rec
+
+                    if recuperado:
+                        self.log_add(
+                            f"[ENTREGA] {delivery.escravo_nome} foi atacado por "
+                            f"{ataque['nome']}! Guardas recuperaram a carga.", GREEN
+                        )
+                    else:
+                        delivery.status     = "perdido"
+                        delivery.ataque_nome = ataque["nome"]
+                        delivery.ataque_cor  = ataque["cor"]
+                        self.log_add(
+                            f"[ENTREGA] {delivery.qtd}x {delivery.recurso} de "
+                            f"{delivery.escravo_nome} ROUBADO por {ataque['nome']}!", RED
+                        )
+                        continue
+
+            # Entrega concluída
+            if delivery.timer <= 0 and delivery.status == "transito":
+                delivery.status = "entregue"
+                self.inventario[delivery.recurso] = (
+                    self.inventario.get(delivery.recurso, 0) + delivery.qtd
+                )
+                self.stats["rec_qtd"][delivery.recurso] = (
+                    self.stats["rec_qtd"].get(delivery.recurso, 0) + delivery.qtd
+                )
+                self.stats["recursos_enc"].add(delivery.recurso)
+
+        # Mantém apenas transito + últimas 15 concluídas (para exibição)
+        em_transito  = [d for d in self.entregas if d.status == "transito"]
+        concluidas   = [d for d in self.entregas if d.status != "transito"][-15:]
+        self.entregas = em_transito + concluidas
+
     def _ciclo_mineracao(self, escravo: Escravo):
         recurso, qtd, valor = escravo.executar_mineracao(
             self.tempo_jogo, self.mult_raridade, self.mult_recursos, self.mult_sorte
         )
-        self.inventario[recurso] = self.inventario.get(recurso, 0) + qtd
+        # Registra no stats imediatamente (para conquistas/display)
         self.stats["recursos_enc"].add(recurso)
-        self.stats["rec_qtd"][recurso] = self.stats["rec_qtd"].get(recurso, 0) + qtd
+
+        # Cria entrega em vez de adicionar ao inventário diretamente
+        t_entrega = self._calcular_delivery_time(escravo)
+        delivery  = Delivery(recurso, qtd, valor, escravo.nome, t_entrega)
+        self.entregas.append(delivery)
 
         # Loga apenas recursos raros (p < 0.10) ou 10% dos comuns
         raro = RESOURCES[recurso]["raridade"] < 0.10
         if raro or random.random() < 0.10:
             cor = RESOURCES[recurso]["cor"]
-            self.log_add(f"{escravo.nome} encontrou {qtd}x {recurso}! (+{valor}g)", cor)
+            self.log_add(
+                f"{escravo.nome} extraiu {qtd}x {recurso}! "
+                f"(cofre em {t_entrega:.0f}s)", cor
+            )
 
         # Verificação de drop de item
         for item_id, chance in ITEM_DROP_CHANCES.items():
@@ -962,6 +1108,8 @@ class GameManager:
     def _tentar_evento(self):
         if not self.escravos_vivos or self.notificacao:
             return
+        # Tenta aparecer vendedor
+        self._tentar_vendedor()
         for ev in random.sample(RANDOM_EVENTS, len(RANDOM_EVENTS)):
             chance = self.rules["event_chances"].get(ev["id"], ev["chance"])
             if ev["id"] == "rebelliao":
@@ -1075,6 +1223,434 @@ class GameManager:
         }
 
     # ==============================================================
+    # SISTEMA DE GERENTES
+    # ==============================================================
+
+    def contratar_gerente(self, tipo: str) -> tuple[bool, str]:
+        tier = next((t for t in MANAGER_TIERS if t["tipo"] == tipo), None)
+        if not tier:
+            return False, "Tipo inválido."
+        if len(self.gerentes) >= MAX_GERENTES:
+            return False, f"Máximo de {MAX_GERENTES} gerentes."
+        if self.ouro < tier["preco"]:
+            return False, f"Precisa de {tier['preco']:,}g"
+        self.ouro -= tier["preco"]
+        g = Gerente(tipo=tipo)
+        self.gerentes.append(g)
+        self._t_gerentes[g.id] = g.check_interval
+        self.log_add(f"[GERENTE] {g.nome} ({tier['nome']}) contratado!", GOLD)
+        return True, "Gerente contratado!"
+
+    def demitir_gerente(self, gerente_id: int) -> tuple[bool, str]:
+        g = self.get_gerente(gerente_id)
+        if not g:
+            return False, "Gerente não encontrado."
+        self.gerentes.remove(g)
+        self._t_gerentes.pop(g.id, None)
+        # Remove recomendações deste gerente da fila
+        self.fila_recomendacoes = [
+            r for r in self.fila_recomendacoes
+            if r.get("gerente_id") != gerente_id
+        ]
+        self.log_add(f"[GERENTE] {g.nome} foi demitido.", ORANGE)
+        return True, "Gerente demitido."
+
+    def get_gerente(self, gerente_id: int) -> Gerente | None:
+        for g in self.gerentes:
+            if g.id == gerente_id:
+                return g
+        return None
+
+    def set_autonomia_gerente(self, gerente_id: int, autonomia: str) -> tuple[bool, str]:
+        g = self.get_gerente(gerente_id)
+        if not g:
+            return False, "Gerente não encontrado."
+        if autonomia not in MANAGER_AUTONOMIA:
+            return False, "Modo inválido."
+        g.autonomia = autonomia
+        self.log_add(f"[GERENTE] {g.nome} → modo {autonomia}.", CYAN)
+        return True, "Modo alterado."
+
+    def toggle_cfg_gerente(self, gerente_id: int, cfg_key: str) -> tuple[bool, str]:
+        """Alterna um flag booleano de configuração do gerente."""
+        g = self.get_gerente(gerente_id)
+        if not g or not hasattr(g, cfg_key):
+            return False, "Configuração inválida."
+        setattr(g, cfg_key, not getattr(g, cfg_key))
+        return True, "Configuração alterada."
+
+    def _snapshot_estado(self) -> dict:
+        """Cria snapshot do estado do jogo para os gerentes analisarem."""
+        return {
+            "ouro":               self.ouro,
+            "escravos":           self.escravos_vivos,
+            "loja":               self.loja,
+            "guardas":            self.guardas,
+            "nivel_mina":         self.nivel_mina,
+            "mercado_negro":      self.mercado_negro,
+            "inventario_itens":   self.inventario_itens,
+            "inventario_guard":   self.inventario_guard_itens,
+            "n_pares":            len(self.pares),
+            "capacidade":         self.capacidade_servos,
+        }
+
+    def _update_gerentes(self, delta: float):
+        """Tick de cada gerente; quando o timer bate, executa análise."""
+        estado = None  # lazy — só computa uma vez se necessário
+        for g in self.gerentes:
+            t = self._t_gerentes.get(g.id, g.check_interval)
+            t -= delta
+            self._t_gerentes[g.id] = t
+            if t > 0:
+                continue
+
+            # Reinicia timer
+            self._t_gerentes[g.id] = g.check_interval
+
+            # Snapshot lazy
+            if estado is None:
+                estado = self._snapshot_estado()
+
+            recs = g.analisar(estado)
+            if not recs:
+                continue
+
+            for rec in recs:
+                rec["gerente_id"]   = g.id
+                rec["gerente_nome"] = g.nome
+
+                if g.autonomia == "automatico":
+                    # Executa silenciosamente
+                    executado = self._executar_acao_rec(rec)
+                    if executado:
+                        g.acoes_realizadas += 1
+                        if rec["urgencia"] >= 2:
+                            self.log_add(
+                                f"[GERENTE] {g.nome}: {rec['msg']}", rec.get("cor", GOLD)
+                            )
+
+                elif g.autonomia == "semi":
+                    # Executa urgência 3 automaticamente; as demais vai para fila
+                    if rec["urgencia"] >= 3:
+                        executado = self._executar_acao_rec(rec)
+                        if executado:
+                            g.acoes_realizadas += 1
+                            self.log_add(
+                                f"[GERENTE] {g.nome} (auto): {rec['msg']}", rec.get("cor", GOLD)
+                            )
+                    else:
+                        self._enfileirar_rec(rec)
+
+                else:  # recomendacao
+                    self._enfileirar_rec(rec)
+
+    def _enfileirar_rec(self, rec: dict):
+        """Adiciona recomendação à fila, evitando duplicatas do mesmo tipo."""
+        tipos_na_fila = {r["tipo"] for r in self.fila_recomendacoes}
+        if rec["tipo"] not in tipos_na_fila:
+            self.fila_recomendacoes.append(rec)
+            # Mantém o máximo
+            if len(self.fila_recomendacoes) > MAX_RECOMENDACOES:
+                # Remove a mais antiga e de menor urgência
+                self.fila_recomendacoes.sort(key=lambda r: r.get("urgencia", 1))
+                self.fila_recomendacoes.pop(0)
+
+    def _executar_acao_rec(self, rec: dict) -> bool:
+        """Executa a ação indicada na recomendação. Retorna True se executou."""
+        tipo  = rec.get("acao_tipo")
+        param = rec.get("acao_param")
+        if not tipo:
+            return False
+        try:
+            if tipo == "vender_escravo":
+                e = self.get_escravo(param)
+                if e:
+                    self.vender_escravo(e)
+                    return True
+            elif tipo == "aposentar_escravo":
+                ok, _ = self.aposentar_escravo(param)
+                return ok
+            elif tipo == "curar_escravo":
+                eid, iid = param
+                ok, _ = self.usar_item_especial(eid, iid)
+                return ok
+            elif tipo == "usar_item_especial":
+                eid, iid = param
+                ok, _ = self.usar_item_especial(eid, iid)
+                return ok
+            elif tipo == "comprar_oferta_loja":
+                ok, _ = self.comprar_oferta_loja(param)
+                return ok
+            elif tipo == "auto_equipar_todos":
+                ok, _ = self.auto_equipar_melhores_todos()
+                return ok
+            elif tipo == "descanso_geral":
+                for e in self.escravos_vivos:
+                    if e.stamina < 20:
+                        e.em_repouso = True
+                return True
+            elif tipo == "comprar_guarda":
+                ok, _ = self.comprar_guarda(param)
+                return ok
+            elif tipo == "vender_tudo":
+                total = self.vender_tudo()
+                return total > 0
+        except Exception:
+            pass
+        return False
+
+    def executar_recomendacao(self, idx: int) -> tuple[bool, str]:
+        """Chamado quando o jogador clica em 'Executar' em uma recomendação."""
+        if idx >= len(self.fila_recomendacoes):
+            return False, "Recomendação não encontrada."
+        rec = self.fila_recomendacoes[idx]
+        executado = self._executar_acao_rec(rec)
+        if executado:
+            g = self.get_gerente(rec.get("gerente_id", -1))
+            if g:
+                g.acoes_realizadas += 1
+            self.fila_recomendacoes.pop(idx)
+            return True, "Ação executada!"
+        self.fila_recomendacoes.pop(idx)
+        return False, "Não foi possível executar."
+
+    def ignorar_recomendacao(self, idx: int):
+        if 0 <= idx < len(self.fila_recomendacoes):
+            self.fila_recomendacoes.pop(idx)
+
+    # ==============================================================
+    # VENDEDOR AMBULANTE
+    # ==============================================================
+
+    def _tentar_vendedor(self):
+        """Tenta fazer um vendedor aparecer durante o evento."""
+        if self.vendedor_atual:
+            return
+        if random.random() < VENDOR_APPEAR_CHANCE:
+            self._gerar_vendedor()
+
+    def _gerar_vendedor(self):
+        """Gera um vendedor com 3 itens. Qualidade depende do sorteio."""
+        qualidades = list(VENDOR_QUALITY_WEIGHTS.keys())
+        pesos      = [VENDOR_QUALITY_WEIGHTS[q] for q in qualidades]
+        total      = sum(pesos)
+        r = random.random() * total
+        acc = 0.0
+        qualidade = qualidades[0]
+        for q, p in zip(qualidades, pesos):
+            acc += p
+            if r <= acc:
+                qualidade = q
+                break
+
+        filtro = {
+            "barato":  (["comum", "incomum"], False, 0.60),
+            "raro":    (["raro", "épico"],    False, 1.50),
+            "ruim":    (["comum"],            False, 0.25),
+            "maldito": (["épico","lendário"], True,  0.80),
+        }
+        rars_aceitas, apenas_maldito, mult_preco = filtro[qualidade]
+
+        candidatos: list[tuple[str, dict, str]] = []
+        for iid, data in ITEMS.items():
+            if apenas_maldito and not data.get("maldito"):
+                continue
+            if data.get("raridade") in rars_aceitas:
+                candidatos.append((iid, data, "slave"))
+        for iid, data in GUARD_ITEMS.items():
+            if data.get("raridade") in rars_aceitas:
+                candidatos.append((iid, data, "guard"))
+
+        if not candidatos:
+            candidatos = [(iid, data, "slave") for iid, data in ITEMS.items()]
+
+        random.shuffle(candidatos)
+        itens_com_preco = []
+        for iid, data, tipo in candidatos[:VENDOR_ITEMS_COUNT]:
+            preco_base = data.get("preco", 50)
+            if data.get("raridade") == "comum":    preco_base = max(preco_base, 80)
+            elif data.get("raridade") == "incomum":preco_base = max(preco_base, 200)
+            elif data.get("raridade") == "raro":   preco_base = max(preco_base, 600)
+            elif data.get("raridade") == "épico":  preco_base = max(preco_base, 1500)
+            elif data.get("raridade") == "lendário":preco_base = max(preco_base, 4000)
+            itens_com_preco.append({
+                "id":    iid,
+                "preco": max(10, int(preco_base * mult_preco)),
+                "tipo":  tipo,
+                "nome":  data.get("nome", iid),
+                "raridade": data.get("raridade", "comum"),
+            })
+
+        self.vendedor_atual = {
+            "qualidade": qualidade,
+            "itens":     itens_com_preco,
+            "timer":     VENDOR_TIMER,
+        }
+        desc = {
+            "barato": "Mercador de Bugigangas",
+            "raro":   "Comerciante Raro",
+            "ruim":   "Mascate Duvidoso",
+            "maldito":"Vendedor das Sombras",
+        }
+        self.log_add(f"[VENDEDOR] {desc[qualidade]} apareceu! {VENDOR_TIMER:.0f}s.", GOLD)
+
+    def comprar_item_vendedor(self, item_id: str, preco: int) -> tuple[bool, str]:
+        if not self.vendedor_atual:
+            return False, "Nenhum vendedor disponível."
+        if self.ouro < preco:
+            return False, f"Precisa de {preco}g"
+        found = next(
+            (it for it in self.vendedor_atual["itens"]
+             if it["id"] == item_id and it["preco"] == preco),
+            None,
+        )
+        if not found:
+            return False, "Item não disponível."
+        self.ouro -= preco
+        self.vendedor_atual["itens"].remove(found)
+        if found["tipo"] == "guard":
+            self.inventario_guard_itens.append(item_id)
+        else:
+            self.inventario_itens.append(item_id)
+        nome = found.get("nome", item_id)
+        self.log_add(f"[VENDEDOR] Comprou '{nome}' por {preco}g!", GOLD)
+        return True, "Comprado!"
+
+    # ==============================================================
+    # SISTEMA DE GUARDAS
+    # ==============================================================
+
+    def comprar_guarda(self, tipo: str) -> tuple[bool, str]:
+        tier = next((t for t in GUARD_TIERS if t["tipo"] == tipo), None)
+        if not tier:
+            return False, "Tipo inválido."
+        if len(self.guardas) >= MAX_GUARDAS:
+            return False, f"Máximo de {MAX_GUARDAS} guardas."
+        if self.ouro < tier["preco"]:
+            return False, f"Precisa de {tier['preco']}g"
+        self.ouro -= tier["preco"]
+        g = Guarda(tipo=tipo)
+        self.guardas.append(g)
+        self.log_add(f"[GUARDA] {g.nome} ({tier['nome']}) contratado!", CYAN)
+        return True, "Guarda contratado!"
+
+    def demitir_guarda(self, guarda_id: int) -> tuple[bool, str]:
+        g = self.get_guarda(guarda_id)
+        if not g:
+            return False, "Guarda não encontrado."
+        for slot in GUARD_SLOTS:
+            iid = g.equipamentos.get(slot)
+            if iid:
+                self.inventario_guard_itens.append(iid)
+        self.guardas.remove(g)
+        self.log_add(f"[GUARDA] {g.nome} foi dispensado.", ORANGE)
+        return True, "Guarda dispensado."
+
+    def equipar_item_guarda(self, guarda_id: int, item_id: str) -> tuple[bool, str]:
+        if item_id not in self.inventario_guard_itens:
+            return False, "Item não no inventário de guardas."
+        if item_id not in GUARD_ITEMS:
+            return False, "Item inválido para guardas."
+        g = self.get_guarda(guarda_id)
+        if not g:
+            return False, "Guarda não encontrado."
+        slot     = GUARD_ITEMS[item_id]["slot"]
+        atual    = g.equipamentos.get(slot)
+        if atual:
+            self.inventario_guard_itens.append(atual)
+        self.inventario_guard_itens.remove(item_id)
+        g.equipamentos[slot] = item_id
+        nome = GUARD_ITEMS[item_id]["nome"]
+        self.log_add(f"[GUARDA] {g.nome} equipou '{nome}'.", CYAN)
+        return True, "Item equipado!"
+
+    def desequipar_item_guarda(self, guarda_id: int, slot: str) -> tuple[bool, str]:
+        g = self.get_guarda(guarda_id)
+        if not g:
+            return False, "Guarda não encontrado."
+        iid = g.equipamentos.get(slot)
+        if not iid:
+            return False, "Slot vazio."
+        g.equipamentos[slot] = None
+        self.inventario_guard_itens.append(iid)
+        nome = GUARD_ITEMS.get(iid, {}).get("nome", iid)
+        self.log_add(f"[GUARDA] {g.nome} desequipou '{nome}'.", GRAY)
+        return True, "Item removido!"
+
+    def get_guarda(self, guarda_id: int) -> Guarda | None:
+        for g in self.guardas:
+            if g.id == guarda_id:
+                return g
+        return None
+
+    def _gerar_loja_guard_itens(self):
+        self.loja_guard_itens.clear()
+        opcoes = list(GUARD_ITEMS.keys())
+        random.shuffle(opcoes)
+        for iid in opcoes[:5]:
+            data = GUARD_ITEMS[iid]
+            self.loja_guard_itens.append({
+                "id":    iid,
+                "preco": data["preco"] * 2,
+            })
+        self.log_add("[GUARDAS] Nova loja de equipamentos disponível!", CYAN)
+
+    def comprar_item_guarda_loja(self, item_id: str, preco: int) -> tuple[bool, str]:
+        if self.ouro < preco:
+            return False, f"Precisa de {preco}g"
+        found = next(
+            (i for i, it in enumerate(self.loja_guard_itens)
+             if it["id"] == item_id and it["preco"] == preco),
+            None,
+        )
+        if found is None:
+            return False, "Item não disponível."
+        self.ouro -= preco
+        self.loja_guard_itens.pop(found)
+        self.inventario_guard_itens.append(item_id)
+        nome = GUARD_ITEMS.get(item_id, {}).get("nome", item_id)
+        self.log_add(f"Comprou '{nome}' para guardas por {preco}g!", GOLD)
+        return True, "Comprado!"
+
+    def auto_equipar_guarda(self, guarda_id: int) -> tuple[bool, str]:
+        """Equipa os melhores itens disponíveis no inventário de guardas."""
+        g = self.get_guarda(guarda_id)
+        if not g:
+            return False, "Guarda não encontrado."
+        ranks = {"comum": 0, "incomum": 1, "raro": 2, "épico": 3, "lendário": 4}
+        equipou = False
+        for slot in GUARD_SLOTS:
+            best_id, best_rank = None, -1
+            curr_id = g.equipamentos.get(slot)
+            if curr_id and curr_id in GUARD_ITEMS:
+                best_rank = ranks.get(GUARD_ITEMS[curr_id].get("raridade", "comum"), -1)
+            for iid in list(self.inventario_guard_itens):
+                if iid in GUARD_ITEMS and GUARD_ITEMS[iid]["slot"] == slot:
+                    r = ranks.get(GUARD_ITEMS[iid].get("raridade", "comum"), 0)
+                    if r > best_rank:
+                        best_rank = r
+                        best_id   = iid
+            if best_id:
+                if curr_id:
+                    self.inventario_guard_itens.append(curr_id)
+                self.inventario_guard_itens.remove(best_id)
+                g.equipamentos[slot] = best_id
+                equipou = True
+        if equipou:
+            self.log_add(f"[GUARDA] {g.nome} equipado automaticamente!", GREEN)
+            return True, "Equipado!"
+        return False, "Nenhum item melhor encontrado."
+
+    # Calcula o bônus coletivo de todos os guardas ativos
+    def guardas_ataque_reducao(self) -> float:
+        total_agi = sum(g.agilidade_efetiva() for g in self.guardas if g.ativo)
+        return min(0.60, total_agi / 400.0)
+
+    def guardas_recuperacao_bonus(self) -> float:
+        total_forca = sum(g.forca_efetiva() for g in self.guardas if g.ativo)
+        return min(0.35, total_forca / 300.0)
+
+    # ==============================================================
     # PRESTÍGIO
     # ==============================================================
 
@@ -1095,7 +1671,11 @@ class GameManager:
         prest_bkp    = self.prestigios
         almas_bkp    = self.almas_eternas
         bonus_bkp    = self.bonus_prestigio
-        inv_itens_bkp = list(self.inventario_itens)
+        inv_itens_bkp       = list(self.inventario_itens)
+        guardas_bkp         = list(self.guardas)
+        inv_guard_bkp       = list(self.inventario_guard_itens)
+        gerentes_bkp        = list(self.gerentes)
+        t_gerentes_bkp      = dict(self._t_gerentes)
 
         self._init_state()
 
@@ -1106,7 +1686,11 @@ class GameManager:
         self.bonus_prestigio = bonus_bkp
         self.ouro            = 100 + self.almas_eternas * 20
         self.primeiro_jogo   = False
-        self.inventario_itens = inv_itens_bkp  # mantém itens entre prestígios
+        self.inventario_itens        = inv_itens_bkp   # mantém itens entre prestígios
+        self.guardas                 = guardas_bkp
+        self.inventario_guard_itens  = inv_guard_bkp
+        self.gerentes                = gerentes_bkp    # mantém gerentes entre prestígios
+        self._t_gerentes             = t_gerentes_bkp
 
         self.log_add(f"[PRESTÍGIO #{self.prestigios}] Bônus global: {self.bonus_prestigio:.1f}x!", GOLD)
         return True, f"Prestígio #{self.prestigios} realizado!"
@@ -1239,6 +1823,15 @@ class GameManager:
             "custo_refresco": self.custo_refresco,
             "primeiro_jogo": False,
             "id_counter": Escravo._id_counter,
+            # Guardas
+            "guardas": [g.to_dict() for g in self.guardas],
+            "inventario_guard_itens": self.inventario_guard_itens,
+            # Entregas em trânsito
+            "entregas": [d.to_dict() for d in self.entregas if d.status == "transito"],
+            # Gerentes
+            "gerentes": [g.to_dict() for g in self.gerentes],
+            "fila_recomendacoes": self.fila_recomendacoes,
+            "t_gerentes": {str(k): v for k, v in self._t_gerentes.items()},
         }
 
     def _apply_loaded_state(self, d):
@@ -1295,6 +1888,38 @@ class GameManager:
             self._shop_offer_id = max(self._shop_offer_id, max(oferta["id"] for oferta in self.loja) + 1)
         else:
             self._gerar_loja(forcar=True)
+
+        # Guardas
+        self.guardas = [Guarda.from_dict(gd) for gd in d.get("guardas", [])]
+        self.inventario_guard_itens = d.get("inventario_guard_itens", [])
+        # Entregas salvas: entrega itens diretamente ao inventário (jogo fechado = entregue)
+        for ed in d.get("entregas", []):
+            try:
+                deliv = Delivery.from_dict(ed)
+                if deliv.status == "transito":
+                    # completa imediatamente
+                    self.inventario[deliv.recurso] = (
+                        self.inventario.get(deliv.recurso, 0) + deliv.qtd
+                    )
+                    self.stats["rec_qtd"][deliv.recurso] = (
+                        self.stats["rec_qtd"].get(deliv.recurso, 0) + deliv.qtd
+                    )
+                    self.stats["recursos_enc"].add(deliv.recurso)
+            except Exception:
+                continue
+        self.entregas = []
+        self._last_agora_real = time.time()
+
+        # Gerentes
+        self.gerentes = [Gerente.from_dict(gd) for gd in d.get("gerentes", [])]
+        self.fila_recomendacoes = d.get("fila_recomendacoes", [])
+        self._t_gerentes = {
+            int(k): v for k, v in d.get("t_gerentes", {}).items()
+        }
+        # Garante timers para gerentes sem entrada
+        for g in self.gerentes:
+            if g.id not in self._t_gerentes:
+                self._t_gerentes[g.id] = g.check_interval
 
     def save(self):
         try:

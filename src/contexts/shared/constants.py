@@ -186,12 +186,12 @@ UPGRADE_ORDER = list(MINE_UPGRADES.keys())
 # NÍVEIS DE PROFUNDIDADE DA MINA
 # ============================================================
 MINE_DEPTHS = [
-    {"nome": "Superfície",         "custo": 0,      "mult_raridade": 1.0, "risco_morte": 0.010},
-    {"nome": "Nível 1 — Raso",     "custo": 500,    "mult_raridade": 1.3, "risco_morte": 0.020},
-    {"nome": "Nível 2 — Médio",    "custo": 2000,   "mult_raridade": 1.8, "risco_morte": 0.040},
-    {"nome": "Nível 3 — Fundo",    "custo": 7000,   "mult_raridade": 2.5, "risco_morte": 0.070},
-    {"nome": "Nível 4 — Abismo",   "custo": 20000,  "mult_raridade": 4.0, "risco_morte": 0.120},
-    {"nome": "Nível 5 — Núcleo",   "custo": 60000,  "mult_raridade": 7.0, "risco_morte": 0.200},
+    {"nome": "Superfície",         "custo": 0,      "mult_raridade": 1.0, "risco_morte": 0.0008},
+    {"nome": "Nível 1 — Raso",     "custo": 500,    "mult_raridade": 1.3, "risco_morte": 0.0018},
+    {"nome": "Nível 2 — Médio",    "custo": 2000,   "mult_raridade": 1.8, "risco_morte": 0.0035},
+    {"nome": "Nível 3 — Fundo",    "custo": 7000,   "mult_raridade": 2.5, "risco_morte": 0.0060},
+    {"nome": "Nível 4 — Abismo",   "custo": 20000,  "mult_raridade": 4.0, "risco_morte": 0.0100},
+    {"nome": "Nível 5 — Núcleo",   "custo": 60000,  "mult_raridade": 7.0, "risco_morte": 0.0180},
 ]
 
 # ============================================================
@@ -435,6 +435,174 @@ ITEMS = {
     },
 }
 
+# ============================================================
+# SISTEMA DE ENTREGA (COFRE)
+# ============================================================
+DELIVERY_BASE_TIME    = 15.0   # segundos reais máximos para entrega
+DELIVERY_MIN_TIME     = 2.0    # mínimo de tempo de entrega
+DELIVERY_ATTACK_RATE  = 0.08   # 8% de chance de ataque a cada checagem (~5s reais)
+
+# Ataques durante a entrega: chance base e taxa de recuperação
+DELIVERY_ATTACKS = {
+    "lobo":   {"nome": "Alcateia de Lobos", "chance": 0.40, "recuperar": 0.75, "cor": (200, 150, 60)},
+    "urso":   {"nome": "Urso Gigante",      "chance": 0.20, "recuperar": 0.50, "cor": (160, 100, 60)},
+    "ladrao": {"nome": "Ladroes",           "chance": 0.25, "recuperar": 0.50, "cor": (100, 100, 200)},
+    "orc":    {"nome": "Horda de Orcs",     "chance": 0.15, "recuperar": 0.15, "cor": (80,  200, 80)},
+}
+
+# ============================================================
+# SISTEMA DE GERENTES (MANAGERS / CAPATAZES)
+# ============================================================
+MANAGER_TIERS = [
+    {
+        "tipo": "junior",     "nome": "Gerente Júnior",    "preco": 15_000,
+        "raridade": "incomum","eficiencia": 0.50,
+        "check_interval": 90.0,   # segundos de jogo entre decisões
+        "desc": "Identifica problemas básicos. Ações simples de compra/venda.",
+    },
+    {
+        "tipo": "experiente", "nome": "Gerente Experiente","preco": 60_000,
+        "raridade": "raro",   "eficiencia": 0.75,
+        "check_interval": 60.0,
+        "desc": "Gerencia equipamentos, doenças e otimiza stamina.",
+    },
+    {
+        "tipo": "mestre",     "nome": "Gerente Mestre",    "preco": 250_000,
+        "raridade": "épico",  "eficiencia": 0.90,
+        "check_interval": 30.0,
+        "desc": "Gestão completa: breeding, guardas, maldições e riscos.",
+    },
+    {
+        "tipo": "lendario",   "nome": "Gerente Lendário",  "preco": 1_000_000,
+        "raridade": "lendário","eficiencia": 1.00,
+        "check_interval": 15.0,
+        "desc": "IA perfeita: mercado negro, risco, otimização total.",
+    },
+]
+MANAGER_AUTONOMIA = ["recomendacao", "semi", "automatico"]
+MANAGER_AUTONOMIA_NOMES = {
+    "recomendacao": "Só Recomenda",
+    "semi":         "Semi-Auto",
+    "automatico":   "Automático",
+}
+MAX_GERENTES = 3
+MAX_RECOMENDACOES = 20   # quantas ficam na fila
+
+# ============================================================
+# SISTEMA DE GUARDAS
+# ============================================================
+MAX_GUARDAS = 10
+GUARD_SLOTS = ["capacete", "peitoral", "calcas", "botas", "espada", "arco"]
+GUARD_SLOT_NOMES = {
+    "capacete": "Capacete",
+    "peitoral": "Peitoral",
+    "calcas":   "Calcas",
+    "botas":    "Botas",
+    "espada":   "Espada",
+    "arco":     "Arco",
+}
+
+# Tiers de guarda disponíveis para compra
+GUARD_TIERS = [
+    {"tipo": "velho",    "nome": "Guarda Velho",    "preco": 200,  "attr_range": (5,  20), "idade_range": (55, 70), "raridade": "comum"},
+    {"tipo": "basico",   "nome": "Guarda Basico",   "preco": 450,  "attr_range": (15, 40), "idade_range": (20, 45), "raridade": "comum"},
+    {"tipo": "normal",   "nome": "Guarda Normal",   "preco": 1000, "attr_range": (35, 65), "idade_range": (20, 40), "raridade": "incomum"},
+    {"tipo": "epico",    "nome": "Guarda Epico",    "preco": 3000, "attr_range": (65, 85), "idade_range": (18, 30), "raridade": "épico"},
+    {"tipo": "lendario", "nome": "Guarda Lendario", "preco": 9000, "attr_range": (85,100), "idade_range": (18, 25), "raridade": "lendário"},
+]
+
+# Itens exclusivos para guardas
+GUARD_ITEMS = {
+    # ---- CAPACETES ----
+    "gcap_couro": {
+        "nome": "Elmo de Couro",   "slot": "capacete", "raridade": "comum",
+        "bonus": {"resistencia": 5,  "forca": 2},                     "preco": 120, "cor_visual": (180, 100,  50),
+    },
+    "gcap_ferro": {
+        "nome": "Elmo de Ferro",   "slot": "capacete", "raridade": "incomum",
+        "bonus": {"resistencia": 12, "forca": 5},                     "preco": 350, "cor_visual": (180, 180, 190),
+    },
+    "gcap_aco": {
+        "nome": "Elmo de Aco",     "slot": "capacete", "raridade": "raro",
+        "bonus": {"resistencia": 22, "forca": 10, "agilidade": 5},   "preco": 900, "cor_visual": (130, 140, 160),
+    },
+    # ---- PEITORAIS ----
+    "gpe_couro": {
+        "nome": "Peitoral de Couro","slot": "peitoral", "raridade": "comum",
+        "bonus": {"resistencia": 8},                                   "preco": 150, "cor_visual": (120,  70,  30),
+    },
+    "gpe_ferro": {
+        "nome": "Peitoral de Ferro","slot": "peitoral", "raridade": "incomum",
+        "bonus": {"resistencia": 18, "forca": 5},                     "preco": 450, "cor_visual": (180, 180, 200),
+    },
+    "gpe_aco": {
+        "nome": "Peitoral de Aco", "slot": "peitoral", "raridade": "raro",
+        "bonus": {"resistencia": 30, "forca": 12},                    "preco": 1100,"cor_visual": (140, 150, 170),
+    },
+    # ---- CALCAS ----
+    "gcal_pano": {
+        "nome": "Calcas de Pano",  "slot": "calcas",   "raridade": "comum",
+        "bonus": {"agilidade": 5},                                     "preco":  80, "cor_visual": (180, 170, 150),
+    },
+    "gcal_couro": {
+        "nome": "Calcas de Couro", "slot": "calcas",   "raridade": "incomum",
+        "bonus": {"agilidade": 12, "resistencia": 4},                 "preco": 280, "cor_visual": (100,  60,  20),
+    },
+    # ---- BOTAS ----
+    "gbot_couro": {
+        "nome": "Botas de Couro",  "slot": "botas",    "raridade": "comum",
+        "bonus": {"agilidade": 8},                                     "preco": 110, "cor_visual": ( 90,  50,  20),
+    },
+    "gbot_ferro": {
+        "nome": "Botas de Ferro",  "slot": "botas",    "raridade": "incomum",
+        "bonus": {"agilidade": 5,  "resistencia": 10},                "preco": 350, "cor_visual": (150, 150, 160),
+    },
+    # ---- ESPADAS ----
+    "gesp_ferro": {
+        "nome": "Espada de Ferro", "slot": "espada",   "raridade": "comum",
+        "bonus": {"forca": 15},                                        "preco": 250, "cor_visual": (180, 180, 200),
+    },
+    "gesp_aco": {
+        "nome": "Espada de Aco",   "slot": "espada",   "raridade": "incomum",
+        "bonus": {"forca": 28, "resistencia": 6},                     "preco": 700, "cor_visual": (140, 150, 170),
+    },
+    "gesp_ouro": {
+        "nome": "Espada Dourada",  "slot": "espada",   "raridade": "raro",
+        "bonus": {"forca": 45, "agilidade": 10},                      "preco":1800, "cor_visual": (255, 215,   0),
+    },
+    "gesp_lend": {
+        "nome": "Lamina Lendaria", "slot": "espada",   "raridade": "lendário",
+        "bonus": {"forca": 70, "agilidade": 18, "resistencia": 12},  "preco":6000, "cor_visual": (100, 255, 255),
+    },
+    # ---- ARCOS ----
+    "garc_madeira": {
+        "nome": "Arco de Madeira", "slot": "arco",     "raridade": "comum",
+        "bonus": {"agilidade": 12},                                    "preco": 180, "cor_visual": (120,  80,  30),
+    },
+    "garc_composto": {
+        "nome": "Arco Composto",   "slot": "arco",     "raridade": "incomum",
+        "bonus": {"agilidade": 25, "forca": 6},                       "preco": 550, "cor_visual": ( 90,  60,  20),
+    },
+    "garc_magico": {
+        "nome": "Arco Magico",     "slot": "arco",     "raridade": "épico",
+        "bonus": {"agilidade": 45, "forca": 18},                      "preco":2500, "cor_visual": ( 80, 180, 255),
+    },
+}
+
+# ============================================================
+# VENDEDOR AMBULANTE
+# ============================================================
+VENDOR_APPEAR_CHANCE   = 0.20   # chance por checagem de evento (45s)
+VENDOR_TIMER           = 90.0   # segundos reais que o vendedor fica disponível
+VENDOR_ITEMS_COUNT     = 3      # número de itens oferecidos por vendedor
+VENDOR_QUALITY_WEIGHTS = {
+    "barato":  50,   # itens comuns/incomuns com desconto
+    "raro":    30,   # itens raros/épicos a preço normal
+    "ruim":    15,   # itens com penalidades, muito baratos
+    "maldito":  5,   # itens malditos poderosos
+}
+
+# ============================================================
 # Chance de drop de cada item por ciclo de mineração
 ITEM_DROP_CHANCES = {
     "pic_pedra":   0.0030,

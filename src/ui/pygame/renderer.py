@@ -16,6 +16,9 @@ from src.contexts.shared.constants import (
     RARITY_COLORS, RESOURCES, RESOURCE_ORDER, MINE_UPGRADES, UPGRADE_ORDER,
     MINE_DEPTHS, ACHIEVEMENTS,
     SLOTS, SLOT_NOMES, ITEMS, RETIREMENT_AGE,
+    GUARD_SLOTS, GUARD_SLOT_NOMES, GUARD_ITEMS, GUARD_TIERS, MAX_GUARDAS,
+    DELIVERY_ATTACKS,
+    MANAGER_TIERS, MANAGER_AUTONOMIA, MANAGER_AUTONOMIA_NOMES, MAX_GERENTES,
 )
 
 BASE_SCREEN_WIDTH = SCREEN_WIDTH
@@ -81,7 +84,7 @@ class Renderer:
       Log strip   : (185, 680, 1095, 40)   — última mensagem
     """
 
-    TABS = ["Loja", "Upgrades", "Breeding", "Mercado", "Prestígio", "Conquistas", "Histórico", "Inventário"]
+    TABS = ["Loja", "Upgrades", "Breeding", "Mercado", "Prestígio", "Conquistas", "Histórico", "Inventário", "Guardas", "Gerência"]
     OX   = LOG_SIDEBAR_W  # offset x de todos os painéis principais
 
     def __init__(self, screen, game):
@@ -112,6 +115,18 @@ class Renderer:
         self.btn_reset_confirm = None
         self.btn_reset_cancel  = None
 
+        # Guardas
+        self.guarda_detalhe_id  = None   # guarda selecionado no modal
+        self.guarda_slot_sel    = None   # slot selecionado no modal de guarda
+        self.guardas_scroll     = 0
+
+        # Vendedor
+        self.show_vendedor = False        # modal do vendedor aberto
+
+        # Gerentes
+        self.gerente_modal_id  = None    # ID do gerente com modal de config aberto
+        self.gerencia_scroll   = 0
+
         self.dyn_btns: list[tuple[Btn, tuple]] = []
 
         self._particles: list[list] = []
@@ -131,11 +146,10 @@ class Renderer:
         ui_scale = self.ui_scale
 
         TOP_H = max(44, int(BASE_TOP_H * ui_scale))
-        LOG_H = max(40, int(BASE_LOG_H * ui_scale))
         BOTTOM_H = max(175, int(BASE_BOTTOM_H * cfg.get("bottom_factor", 1.0) * ui_scale))
-        max_bottom = SCREEN_HEIGHT - TOP_H - LOG_H - 240
+        max_bottom = SCREEN_HEIGHT - TOP_H - 240
         BOTTOM_H = min(BOTTOM_H, max(170, max_bottom))
-        MAIN_H = SCREEN_HEIGHT - TOP_H - BOTTOM_H - LOG_H
+        MAIN_H = SCREEN_HEIGHT - TOP_H - BOTTOM_H
 
         mins = [180, 340, 430, 240]
         weights = [
@@ -164,7 +178,6 @@ class Renderer:
         self.r_center  = pygame.Rect(OX + LEFT_W, TOP_H, CENTER_W, MAIN_H)
         self.r_right   = pygame.Rect(OX + LEFT_W + CENTER_W, TOP_H, RIGHT_W, MAIN_H)
         self.r_bottom  = pygame.Rect(OX, TOP_H + MAIN_H, SCREEN_WIDTH - OX, BOTTOM_H)
-        self.r_log     = pygame.Rect(OX, TOP_H + MAIN_H + BOTTOM_H, SCREEN_WIDTH - OX, LOG_H)
 
         self._build_topbar_buttons()
         self._build_tab_buttons()
@@ -294,29 +307,35 @@ class Renderer:
         self._draw_center(mp)
         self._draw_right(mp)
         self._draw_bottom(mp)
-        self._draw_log()
 
         # Divisórias
         def vline(x, y1, y2): pygame.draw.line(self.screen, PANEL_BDR, (x, y1), (x, y2), 1)
         def hline(y, x1, x2): pygame.draw.line(self.screen, PANEL_BDR, (x1, y), (x2, y), 1)
         vline(OX,                 0,     SCREEN_HEIGHT)
         hline(TOP_H,              OX,    SCREEN_WIDTH)
-        hline(TOP_H+MAIN_H,       OX,    SCREEN_WIDTH)
         hline(TOP_H+MAIN_H+BOTTOM_H, OX, SCREEN_WIDTH)
         vline(OX+LEFT_W,          TOP_H, TOP_H+MAIN_H)
         vline(OX+LEFT_W+CENTER_W, TOP_H, TOP_H+MAIN_H)
 
         # Overlays
-        if self.tooltip_slave and not self.slave_detalhe_id:
+        if self.tooltip_slave and not self.slave_detalhe_id and not self.guarda_detalhe_id:
             self._draw_tooltip(mp)
         if self.game.notificacao:
             self._draw_notif()
         if self.show_tutorial:
             self._draw_tutorial()
 
+        # Modal vendedor (por cima da notificação)
+        if self.show_vendedor and self.game.vendedor_atual:
+            self._draw_vendedor_modal(mp)
+
         # Modal de detalhe (por cima de tudo)
         if self.slave_detalhe_id:
             self._draw_slave_detail(mp)
+        if self.guarda_detalhe_id:
+            self._draw_guarda_detail(mp)
+        if self.gerente_modal_id is not None:
+            self._draw_gerente_modal(mp)
         if self.confirm_reset:
             self._draw_reset_confirm(mp)
 
@@ -458,21 +477,64 @@ class Renderer:
         CW   = LEFT_W // COLS
         CH   = 72
 
-        self.screen.set_clip(pygame.Rect(OX, TOP_H, LEFT_W, MAIN_H))
+        # Divide a área entre mineração e entrega
+        MINE_GRID_H = int(MAIN_H * 0.65)
+        self.screen.set_clip(pygame.Rect(OX, TOP_H, LEFT_W, MINE_GRID_H))
 
-        for i, e in enumerate(todos[:24]):
+        # Desenha apenas 4x4 miners (16) para dar espaço ao transporte
+        for i, e in enumerate(todos[:16]):
             col = i % COLS
             row = i // COLS
             cx  = OX + col * CW + CW // 2
-            # Aumentando o offset de 40 para 50 para evitar corte da "rarity glow" na linha do topo
             cy  = TOP_H + 50 + row * CH
 
             e.anim_x = cx
             e.anim_y = cy
-
             self._draw_miner_pixel(cx, cy, e, t_real)
 
         self.screen.set_clip(None)
+
+        # ----------------------------------------------------------
+        # ZONA DE ENTREGA (Road & Environment)
+        # ----------------------------------------------------------
+        ROAD_Y = TOP_H + MINE_GRID_H
+        ROAD_H = MAIN_H - MINE_GRID_H
+        
+        # 1. Desenha Ambiente (Grama/Terra/Árvores)
+        self._draw_road_environment(OX, ROAD_Y, LEFT_W, ROAD_H, t_real)
+
+        # 2. Desenha Entregas Ativas (Cavalos e Carroças)
+        self.screen.set_clip(pygame.Rect(OX, ROAD_Y, LEFT_W, ROAD_H))
+        
+        for delivery in game.entregas:
+            if delivery.timer_max <= 0: continue
+            
+            # Distribuição Vertical (Lanes)
+            # Cada ID de entrega fica em uma "faixa" diferente da estrada
+            lane = delivery.id % 3
+            lane_off = 35 + (lane * 35) # Distribui entre y+35, y+70, y+105
+            
+            prog = 1.0 - (delivery.timer / delivery.timer_max)
+            margin = 55 # Margem para entrar no forte
+            dx = OX + LEFT_W - (prog * (LEFT_W + margin)) + margin - 20
+            
+            if delivery.status == "entregue":
+                if prog > 1.15: continue
+                self._draw_delivery_unit(dx, ROAD_Y + lane_off, delivery, t_real)
+                if 1.0 <= prog <= 1.05:
+                    self._spawn_coin_explosion(OX + 20, ROAD_Y + lane_off)
+            
+            elif delivery.status == "perdido":
+                if prog > 1.3: continue 
+                self._draw_delivery_unit(dx, ROAD_Y + lane_off, delivery, t_real)
+                self._draw_delivery_attack(dx, ROAD_Y + lane_off, delivery, t_real)
+            else:
+                self._draw_delivery_unit(dx, ROAD_Y + lane_off, delivery, t_real)
+
+        self.screen.set_clip(None)
+
+        # 3. Desenha Portal do Forte (Acima dos cavalos que entram)
+        self._draw_fortress_gate(OX, ROAD_Y, ROAD_H)
 
         # Atualiza flashes
         dt = 1.0 / 60
@@ -533,8 +595,41 @@ class Renderer:
         pic_item = e._item_em_slot("picareta")
         is_pic_top = pic_item and pic_item["raridade"] in ("épico", "lendário")
 
-        swing = math.sin(t_real * 5.5 + e.anim_frame * 0.6) * 30
-        vp    = e.stamina / 100.0  # stamina como "barra de vida" no pixel art
+        # --- LÓGICA DE MINERAÇÃO v2 (Dinamismo Total) ---
+        swing_cycle = (t_real * 6.0 + e.anim_frame * 0.4) % 1.0
+        # p: [0..1]
+        if swing_cycle < 0.5:
+            # 1. ANTECIPAÇÃO (Lento para trás)
+            p = swing_cycle / 0.5
+            swing = p * 60
+            lean  = -p * 4   # inclina para trás
+            vib   = 0
+            impact = False
+        elif swing_cycle < 0.6:
+            # 2. IMPACTO (Explosivo para frente)
+            p = (swing_cycle - 0.5) / 0.1
+            swing = 60 - (p * 140) # Swing amplo até -80
+            lean  = -4 + (p * 14)  # Inclina muito para frente
+            vib   = (p * 3) if p < 0.5 else (-3 if p < 0.8 else 0)
+            impact = True
+        elif swing_cycle < 0.7:
+            # 3. KICKBACK / IMPACT FLASH (Rápido travamento)
+            swing = -80
+            lean  = 10
+            vib   = random.uniform(-2, 2)
+            impact = True # Mantém faíscas/flash por 2 frames
+        else:
+            # 4. RESET (Lento retorno)
+            p = (swing_cycle - 0.7) / 0.3
+            swing = -80 + (p * 80)
+            lean  = 10 - (p * 10)
+            vib   = 0
+            impact = False
+            
+        yo += int(lean)
+        cx += int(vib) # Vibração horizontal no impacto
+
+        vp    = e.stamina / 100.0  
         vc    = GREEN if vp > 0.5 else (YELLOW if vp > 0.25 else RED)
 
         # --- GLOW DE RARIDADE OU CONSUMÍVEL ---
@@ -650,6 +745,23 @@ class Renderer:
             pygame.draw.rect(self.screen, pic_cor, (head_x, head_y, 6, 6))
             pygame.draw.rect(self.screen, (min(255,pic_cor[0]+25), min(255,pic_cor[1]+25), min(255,pic_cor[2]+25)), (head_x, head_y, 6, 2))  # highlight
             pygame.draw.rect(self.screen, (max(0,pic_cor[0]-25), max(0,pic_cor[1]-25), max(0,pic_cor[2]-25)), (head_x, head_y+4, 6, 2))  # sombra
+            # Rastro de Movimento (Motion Blur)
+            if impact:
+                trail_s = pygame.Surface((30, 30), pygame.SRCALPHA)
+                pygame.draw.arc(trail_s, (200, 200, 200, 100), (0, 0, 30, 30), 0.5, 2.5, 2)
+                self.screen.blit(trail_s, (cx + 5, cy - 20 + yo))
+                
+                # Impact Flash
+                pygame.draw.circle(self.screen, WHITE, (px1, py1), 5)
+
+            # Partículas de Pedra no Impacto
+            if impact and random.random() < 0.4:
+                self._particles.append([
+                    px1, py1,
+                    random.uniform(2, 6), random.uniform(-6, -2),
+                    25, (130, 120, 110)
+                ])
+
             if is_pic_top:
                 pygame.draw.rect(self.screen, (255, 255, 255), (head_x+2, head_y-2, 2, 8)) # Lâmina central estendida
         else:
@@ -657,15 +769,178 @@ class Renderer:
             pygame.draw.rect(self.screen, body, (cx+8, cy-18+yo, 4, 5))
             pygame.draw.rect(self.screen, skin, (cx+8, cy-13+yo, 4, 10))
 
+    def _draw_delivery_unit(self, x, y, delivery, t_real):
+        """Desenha o cavalo detalhado puxando a carroça (VETORIZADO PARA A ESQUERDA)."""
+        leg_frame = int(t_real * 12) % 4
+        bob = int(math.sin(t_real * 10.0) * 1.8)
+        
+        # Sombra projetada
+        pygame.draw.ellipse(self.screen, (15, 10, 5), (x-25, y+10, 55, 12))
+        
+        h_cor = (95, 65, 35) # Marrom
+        c_cor = (85, 55, 30) # Madeira
+        b_cor = RESOURCES.get(delivery.recurso, {}).get("cor", GOLD)
+        
+        # 1. CAVALO (Olhando para a ESQUERDA)
+        # O cavalo puxa, então ele fica na FRENTE da carroça (à esquerda da carroça no movimento R->L)
+        hx, hy = x - 22, y + bob
+        # Corpo
+        pygame.draw.rect(self.screen, h_cor, (hx, hy, 14, 9), border_radius=2)
+        # Pescoço e Cabeça (Forma mais curva para a esquerda)
+        pygame.draw.rect(self.screen, h_cor, (hx-1, hy-8, 5, 10))
+        pygame.draw.rect(self.screen, h_cor, (hx-6, hy-9, 7, 5), border_radius=1)
+        # Rabo (na direita agora)
+        pygame.draw.line(self.screen, (40, 25, 10), (hx+14, hy+2), (hx+18, hy+6+bob), 2)
+        # Pernas Animadas
+        legs_y = hy + 8
+        if leg_frame in (0, 2):
+            pygame.draw.line(self.screen, (20, 15, 10), (hx+3, legs_y), (hx+1, legs_y+5), 2)
+            pygame.draw.line(self.screen, (20, 15, 10), (hx+11, legs_y), (hx+13, legs_y+5), 2)
+        else:
+            pygame.draw.line(self.screen, (20, 15, 10), (hx+3, legs_y), (hx+5, legs_y+5), 2)
+            pygame.draw.line(self.screen, (20, 15, 10), (hx+11, legs_y), (hx+9, legs_y+5), 2)
+
+        # 2. CARROÇA (Atrás do cavalo, à DIREITA dele)
+        cx, cy = hx + 16, y
+        # Conexão (Eixo)
+        pygame.draw.line(self.screen, (60, 60, 60), (hx+5, hy+4), (cx, cy+4), 1)
+        # Base
+        pygame.draw.rect(self.screen, c_cor, (cx, cy-2, 24, 13))
+        for line_y in range(cy, cy+10, 4):
+            pygame.draw.line(self.screen, (55, 35, 20), (cx, line_y), (cx+23, line_y), 1)
+        # Rodas
+        for rx_off in (6, 18):
+            rx, ry = cx + rx_off, cy + 12
+            pygame.draw.circle(self.screen, (35, 35, 35), (rx, ry), 5)
+            ang = (t_real * 15) % 360
+            pygame.draw.line(self.screen, (80, 80, 80), (rx, ry), (rx + math.cos(ang)*4, ry + math.sin(ang)*4), 1)
+
+        # 3. SACOS
+        for i in range(2):
+            sx, sy = cx + 4 + i*9, cy - 6 + (i%2)*1
+            pygame.draw.circle(self.screen, b_cor, (sx+4, sy+5), 5)
+            pygame.draw.rect(self.screen, b_cor, (sx+3, sy, 4, 3))
+            pygame.draw.rect(self.screen, (max(0, b_cor[0]-60), max(0, b_cor[1]-60), max(0, b_cor[2]-60)), (sx+3, sy+1, 4, 2))
+            if RESOURCES.get(delivery.recurso, {}).get("valor", 0) >= 25:
+                pygame.draw.circle(self.screen, WHITE, (sx+4, sy+4), 2)
+
+    def _draw_delivery_attack(self, x, y, delivery, t_real):
+        """Desenha o sprite do inimigo com silhueta característica."""
+        jump_t = (t_real * 12) % 6
+        off_y = int(math.sin(jump_t) * 18)
+        a_cor = delivery.ataque_cor
+        ex, ey = x + 8, y - 35 + off_y
+        
+        # Silhueta característica baseada no nome
+        name_low = delivery.ataque_nome.lower()
+        if "lobo" in name_low:
+            # Lobo: Orelhas pontudas
+            pygame.draw.rect(self.screen, a_cor, (ex, ey, 11, 8), border_radius=2)
+            pygame.draw.polygon(self.screen, a_cor, [(ex, ey), (ex+3, ey-4), (ex+5, ey)])
+            pygame.draw.polygon(self.screen, a_cor, [(ex+6, ey), (ex+8, ey-4), (ex+11, ey)])
+        elif "orca" in name_low or "orc" in name_low:
+            # Orc: Mais largo, ombros
+            pygame.draw.rect(self.screen, a_cor, (ex-2, ey+2, 14, 9), border_radius=1)
+            pygame.draw.rect(self.screen, a_cor, (ex+1, ey-4, 8, 8), border_radius=4)
+        else:
+            # Genérico/Ladrão: Capuz
+            pygame.draw.rect(self.screen, a_cor, (ex, ey, 10, 10), border_radius=5)
+        
+        # Efeito de Impacto (Substituindo texto fixo por ícone e flash)
+        if int(t_real * 6) % 2 == 0:
+            pygame.draw.circle(self.screen, WHITE, (ex+5, ey+5), 3)
+            self.screen.blit(self.f_small.render("!", True, RED), (ex+3, ey-15))
+        
+    def _draw_road_environment(self, ox, ry, rw, rh, t_real):
+        """Desenha grama, árvores e detalhes do terreno na estrada."""
+        # Chão de terra batida
+        pygame.draw.rect(self.screen, (40, 30, 15), (ox, ry, rw, rh))
+        
+        # Margem de grama superior e inferior
+        pygame.draw.rect(self.screen, (15, 40, 10), (ox, ry, rw, 12))
+        pygame.draw.rect(self.screen, (15, 35, 10), (ox, ry + rh - 12, rw, 12))
+        
+        # Variação de pedras e terra (sem usar random puro todo frame)
+        seed = 42
+        for i in range(12):
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff
+            px = ox + (seed % rw)
+            py = ry + 15 + (seed % (rh - 30))
+            pygame.draw.rect(self.screen, (55, 45, 30), (px, py, 3, 2))
+            
+        # Árvores de fundo (limitadas a 3 para não poluir)
+        for tx in [ox + 80, ox + 220, ox + 360]:
+            # Tronco
+            pygame.draw.rect(self.screen, (60, 40, 20), (tx, ry - 15, 8, 20))
+            # Copa (Mini Pixel Art)
+            pygame.draw.circle(self.screen, (20, 55, 15), (tx + 4, ry - 20), 12)
+            pygame.draw.circle(self.screen, (30, 70, 20), (tx + 8, ry - 22), 8)
+
+        # Tufos de grama na estrada
+        for gx in [ox + 40, ox + 150, ox + 280, ox + 410]:
+            pygame.draw.line(self.screen, (40, 80, 20), (gx, ry + rh - 10), (gx - 3, ry + rh - 16), 2)
+            pygame.draw.line(self.screen, (40, 80, 20), (gx, ry + rh - 10), (gx + 3, ry + rh - 18), 2)
+
+    def _draw_fortress_gate(self, ox, ry, rh):
+        """Desenha a entrada do Forte/Vila (ponto de chegada)."""
+        gate_w = 60
+        # 1. Base/Pilares (Pedra)
+        pygame.draw.rect(self.screen, (60, 60, 65), (ox, ry, 35, rh))           # Parede lateral
+        pygame.draw.rect(self.screen, (45, 45, 50), (ox + 35, ry, 10, rh))     # Sombra interna
+        
+        # 2. Topo/Torre de vigia
+        pygame.draw.rect(self.screen, (70, 70, 75), (ox, ry - 15, 55, 25), border_radius=2)
+        # Merlões (Ameias) da torre
+        for i in range(0, 50, 15):
+            pygame.draw.rect(self.screen, (70, 70, 75), (ox + i, ry - 25, 10, 12))
+            
+        # 3. Janela/Fresta de vigia
+        pygame.draw.rect(self.screen, (10, 10, 10), (ox + 15, ry - 5, 12, 6))
+        
+        # 4. Detalhes de madeira (Portão aberto)
+        pygame.draw.rect(self.screen, (90, 60, 30), (ox + 40, ry + 10, 6, rh - 20))
+
+    def _spawn_coin_explosion(self, x, y):
+        """Cria uma explosão ultrarrápida (0.5s) e concentrada."""
+        for _ in range(3): # Apenas 3 moedas
+            self._particles.append([
+                float(x), float(y),
+                random.uniform(-1.5, 1.5), random.uniform(-4, -2), # Campo pequeno
+                30, GOLD # 30 frames = 0.5s
+            ])
+
+    def _spawn_glow_particles(self, x, y, color):
+        """Cria partículas com brilho suave (usando alpha se possível)."""
+        for _ in range(5):
+            self._particles.append([
+                float(x), float(y),
+                random.uniform(-2, 2), random.uniform(-2, 2),
+                20, color
+            ])
+
     def _update_particles(self):
         nxt = []
+        GRAVITY = 0.26
         for p in self._particles:
-            p[0] += p[2]; p[1] += p[3]; p[3] += 0.08; p[4] -= 1
+            # p: [x, y, vx, vy, life, color]
+            p[0] += p[2]
+            p[1] += p[3]
+            p[3] += GRAVITY
+            p[4] -= 1
             if p[4] > 0:
-                a = min(255, p[4] * 12)
-                s = pygame.Surface((4, 4), pygame.SRCALPHA)
-                s.fill((*p[5], a))
-                self.screen.blit(s, (int(p[0]), int(p[1])))
+                # Fade out suave se a vida for longa
+                alpha = 255
+                if p[4] < 20: 
+                    alpha = int(255 * (p[4] / 20))
+                
+                if alpha < 255:
+                    # Desenha com alpha (Surface temporária ou pixel simples se performance for chave)
+                    s = pygame.Surface((3, 3), pygame.SRCALPHA)
+                    s.fill((*p[5], alpha))
+                    self.screen.blit(s, (int(p[0]), int(p[1])))
+                else:
+                    pygame.draw.rect(self.screen, p[5], (int(p[0]), int(p[1]), 3, 3))
+                
                 nxt.append(p)
         self._particles = nxt
 
@@ -874,11 +1149,61 @@ class Renderer:
         bvt.update(mp); bvt.draw(self.screen, self.f_small)
         self.dyn_btns.append((bvt, ("vender_tudo", None))); y += 26
 
-        # Itens no inventário (resumo)
+        # ── Vendedor disponível ──────────────────────────────────────────
+        if game.vendedor_atual:
+            v = game.vendedor_atual
+            qual_cor = {
+                "barato": GRAY, "raro": BLUE, "ruim": RED, "maldito": PURPLE,
+            }.get(v["qualidade"], GOLD)
+            qual_nomes = {
+                "barato": "Mercador de Bugigangas",
+                "raro":   "Comerciante Raro",
+                "ruim":   "Mascate Duvidoso",
+                "maldito":"Vendedor das Sombras",
+            }
+            pygame.draw.rect(self.screen, (30,20,40), (rx+4, y, RIGHT_W-8, 40), border_radius=4)
+            pygame.draw.rect(self.screen, qual_cor,  (rx+4, y, RIGHT_W-8, 40), 1, border_radius=4)
+            self.screen.blit(self.f_small.render(
+                f"{qual_nomes.get(v['qualidade'],'Vendedor')} [{v['timer']:.0f}s]",
+                True, qual_cor), (rx+8, y+2))
+            bvend = Btn(rx+6, y+16, RIGHT_W-12, 22, "⚡ Ver Itens", cor=(60,25,80), cor_txt=GOLD)
+            bvend.update(mp); bvend.draw(self.screen, self.f_small)
+            self.dyn_btns.append((bvend, ("abrir_vendedor", None)))
+            y += 44
+
+        # ── Entregas em trânsito ─────────────────────────────────────────
+        em_transito = [d for d in game.entregas if d.status == "transito"]
+        if em_transito:
+            pygame.draw.line(self.screen, PANEL_BDR, (rx+4, y), (rx+RIGHT_W-4, y), 1); y += 3
+            self.screen.blit(
+                self.f_small.render(f"ENTREGAS ({len(em_transito)})", True, YELLOW), (rx+6, y)
+            ); y += 13
+            for d in em_transito[:5]:
+                cor_rec = RESOURCES.get(d.recurso, {}).get("cor", GRAY)
+                frac    = max(0.0, d.timer / max(0.1, d.timer_max))
+                bw      = RIGHT_W - 12
+                pygame.draw.rect(self.screen, DARK_GRAY, (rx+6, y, bw, 12), border_radius=3)
+                pygame.draw.rect(self.screen, cor_rec,   (rx+6, y, int(bw*frac), 12), border_radius=3)
+                lbl = f"{d.qtd}x {d.recurso[:8]} ({d.timer:.0f}s)"
+                self.screen.blit(self.f_small.render(lbl, True, WHITE), (rx+8, y+1))
+                y += 14
+            if y < TOP_H + MAIN_H - 4:
+                y += 2
+
+        # ── Resumo itens ─────────────────────────────────────────────────
         n_itens = len(game.inventario_itens)
         if n_itens > 0:
             pygame.draw.line(self.screen, PANEL_BDR, (rx+4, y), (rx+RIGHT_W-4, y), 1); y += 4
             self.screen.blit(self.f_small.render(f"Itens: {n_itens}", True, CYAN), (rx+6, y)); y += 14
+
+        # ── Guardas resumo ───────────────────────────────────────────────
+        if game.guardas:
+            ativos = sum(1 for g in game.guardas if g.ativo)
+            agi_red = game.guardas_ataque_reducao()
+            rec_bon = game.guardas_recuperacao_bonus()
+            pygame.draw.line(self.screen, PANEL_BDR, (rx+4, y), (rx+RIGHT_W-4, y), 1); y += 3
+            self.screen.blit(self.f_small.render(f"Guardas: {ativos}/{len(game.guardas)}", True, CYAN), (rx+6, y)); y += 12
+            self.screen.blit(self.f_small.render(f"-Atq: {agi_red*100:.0f}%  +Rec: {rec_bon*100:.0f}%", True, GREEN), (rx+6, y)); y += 14
 
         pygame.draw.line(self.screen, PANEL_BDR, (rx+4, y), (rx+RIGHT_W-4, y), 1); y += 5
         self.screen.blit(self.f_title.render("ESTATÍSTICAS", True, LIGHT_BROWN), (rx+6, y)); y += 16
@@ -939,6 +1264,8 @@ class Renderer:
         elif self.tab == 5: self._tab_conquistas(mp, cy)
         elif self.tab == 6: self._tab_historico(mp, cy)
         elif self.tab == 7: self._tab_inventario(mp, cy)
+        elif self.tab == 8: self._tab_guardas(mp, cy)
+        elif self.tab == 9: self._tab_gerencia(mp, cy)
 
     # ABA 0: LOJA
     def _tab_loja(self, mp, cy):
@@ -946,9 +1273,9 @@ class Renderer:
         game  = self.game
         CH    = BOTTOM_H - 34
         lh    = self.f_small.get_height()
-        # Sincroniza com ITEM_PANEL_W (220) para evitar que cards de servos fiquem por baixo da loja de itens
-        right_panel_w = 224
-        usable_w = max(220, SCREEN_WIDTH - OX - right_panel_w - 12)
+        # Sincroniza com ITEM_PANEL_W (230) para evitar que cards de servos fiquem por baixo da loja de itens
+        right_panel_w = 236 
+        usable_w = max(220, SCREEN_WIDTH - OX - right_panel_w - 4)
         card_w = max(int(206 * self.ui_scale), min(int(250 * self.ui_scale), usable_w // 3 - 8))
         card_h = max(96, int(96 * self.ui_scale))
         gap = 6
@@ -956,10 +1283,23 @@ class Renderer:
         row_h = card_h + gap
         total_rows = max(1, math.ceil(len(game.loja) / cols))
         content_h = total_rows * row_h - gap
-        self.shop_scroll_max = max(0, content_h - CH)
+        # Viewport dos Cards (Configurações agora calculadas ANTES do scroll max)
+        cards_y_start = cy + 32
+        cards_h = CH - 36
+        self.shop_scroll_max = max(0, content_h - (cards_h - 10)) # Margem de segurança
         self.shop_scroll = max(0, min(self.shop_scroll, self.shop_scroll_max))
 
-        viewport = pygame.Rect(OX + 6, cy, usable_w, CH)
+        # HEADER FIXO (Botão e Status)
+        header_y = cy + 4
+        br = Btn(OX + 8, header_y, 180, 24, f"🔄 Refrescar Loja ({game.custo_refresco}g)", cor=(55, 45, 30))
+        br.update(mp); br.draw(self.screen, self.f_small)
+        self.dyn_btns.append((br, ("refresca", None)))
+        
+        if not game.pode_adicionar_servo():
+            self.screen.blit(self.f_small.render("⚠️ Capacidade máxima atingida!", True, ORANGE), (OX + 200, header_y + 4))
+
+        # Viewport dos Cards
+        viewport = pygame.Rect(OX + 6, cards_y_start, usable_w, cards_h)
         clip_prev = self.screen.get_clip()
         self.screen.set_clip(viewport)
 
@@ -968,12 +1308,13 @@ class Renderer:
             row = i // cols
             col = i % cols
             cx = viewport.x + col * (card_w + gap)
-            card_y = cy + row * row_h - self.shop_scroll
+            card_y = cards_y_start + row * row_h - self.shop_scroll
             if card_y + card_h < viewport.y or card_y > viewport.bottom:
                 continue
 
             cor_r = e.cor_raridade()
-            pygame.draw.rect(self.screen, (26, 17, 9), (cx, card_y, card_w, card_h), border_radius=5)
+            # Fundo transparente com borda (removemos o fundo preto sólido)
+            # pygame.draw.rect(self.screen, (20, 14, 8), (cx, card_y, card_w, card_h), border_radius=5)
             # Borda mais grossa para raridades altas
             raridade = e.raridade_geral()
             b_width = 2 if raridade in ("épico", "lendário") else 1
@@ -1024,27 +1365,20 @@ class Renderer:
 
         if self.shop_scroll_max > 0:
             bar_x = viewport.right - 6
-            pygame.draw.rect(self.screen, DARK_GRAY, (bar_x, viewport.y, 4, CH), border_radius=2)
-            handle_h = max(16, int(CH * (CH / max(CH, content_h))))
-            handle_y = viewport.y + int((CH - handle_h) * (self.shop_scroll / max(1, self.shop_scroll_max)))
+            pygame.draw.rect(self.screen, DARK_GRAY, (bar_x, viewport.y, 4, viewport.height), border_radius=2)
+            handle_h = max(16, int(viewport.height * (viewport.height / max(viewport.height, content_h))))
+            handle_y = viewport.y + int((viewport.height - handle_h) * (self.shop_scroll / max(1, self.shop_scroll_max)))
             pygame.draw.rect(self.screen, LIGHT_BROWN, (bar_x, handle_y, 4, handle_h), border_radius=2)
-
-        br = Btn(OX + 8, cy + CH - 30, 180, 24, f"Refrescar Loja ({game.custo_refresco}g)", cor=(60,50,18))
-        br.update(mp); br.draw(self.screen, self.f_small)
-        self.dyn_btns.append((br, ("refresca", None)))
-        if not game.pode_adicionar_servo():
-            self.screen.blit(self.f_small.render("Capacidade máxima da mina atingida.", True, ORANGE), (OX + 200, cy + CH - 26))
 
         # ============================================================
         # Loja de Itens Especial — painel fixo no canto direito
         # ============================================================
-        ITEM_PANEL_W = 220
-        item_x = SCREEN_WIDTH - ITEM_PANEL_W - 4
+        ITEM_PANEL_W = 230
+        item_x = SCREEN_WIDTH - ITEM_PANEL_W - 6
         item_y = cy
         
-        # Fundo do painel
-        pygame.draw.rect(self.screen, (18, 10, 25), (item_x, item_y, ITEM_PANEL_W, CH), border_radius=6)
-        pygame.draw.rect(self.screen, PURPLE, (item_x, item_y, ITEM_PANEL_W, CH), 1, border_radius=6)
+        # Fundo do painel (Totalmente integrado/transparente)
+        pygame.draw.rect(self.screen, (100, 60, 140), (item_x, item_y, ITEM_PANEL_W, CH), 1, border_radius=6)
         
         self.screen.blit(self.f_normal.render("Mercador de Itens", True, PURPLE), (item_x + 6, item_y + 4))
         mins, secs = divmod(max(0, 300 - game.loja_itens_timer), 60)
@@ -1407,11 +1741,6 @@ class Renderer:
         self.screen.set_clip(None)
 
     # ------------------------------------------------------------------
-    # LOG STRIP — última mensagem no rodapé
-    # ------------------------------------------------------------------
-
-    def _draw_log(self):
-        pygame.draw.rect(self.screen, (10, 6, 3), self.r_log)
         if self.game.log:
             entry = self.game.log[0]
             ts = self.f_small.render(entry["msg"][:180], True, entry["cor"])
@@ -1738,6 +2067,564 @@ class Renderer:
         pygame.draw.line(self.screen, PANEL_BDR, (COL3_X-5, py+50), (COL3_X-5, py+H-10), 1)
 
     # ------------------------------------------------------------------
+    # ABA 8: GUARDAS
+    # ------------------------------------------------------------------
+
+    def _tab_guardas(self, mp, cy):
+        OX   = self.OX
+        game = self.game
+        W    = SCREEN_WIDTH - OX
+        # Divide em dois: lista de guardas (esquerda) e compra/loja (direita)
+        split = W // 2
+
+        # ── LADO ESQUERDO — lista de guardas ────────────────────────────
+        x = OX + 6; y = cy
+        self.screen.blit(self.f_title.render("GUARDAS CONTRATADOS", True, CYAN), (x, y)); y += 16
+
+        if not game.guardas:
+            self.screen.blit(self.f_small.render("Nenhum guarda contratado.", True, DARK_GRAY), (x, y)); y += 14
+        else:
+            gw = split - 12
+            for g in game.guardas:
+                cor_r = g.cor_raridade()
+                gy    = y
+                pygame.draw.rect(self.screen, (18,14,8), (x, gy, gw, 38), border_radius=4)
+                pygame.draw.rect(self.screen, cor_r,     (x, gy, gw, 38), 1, border_radius=4)
+
+                # Info básica
+                gen = "M" if g.genero == "M" else "F"
+                self.screen.blit(self.f_small.render(
+                    f"{gen} {g.nome[:14]}  [{g.raridade}]  Idade:{g.idade:.0f}",
+                    True, cor_r), (x+4, gy+3))
+                self.screen.blit(self.f_small.render(
+                    f"Forca:{g.forca_efetiva()}  Res:{g.resistencia_efetiva()}  Agi:{g.agilidade_efetiva()}",
+                    True, GRAY), (x+4, gy+14))
+
+                # Equipamentos (pontos coloridos)
+                eq_x = x + 4
+                for slot in GUARD_SLOTS:
+                    iid = g.equipamentos.get(slot)
+                    cor = GUARD_ITEMS[iid].get("cor_visual", WHITE) if iid and iid in GUARD_ITEMS else DARK_GRAY
+                    pygame.draw.circle(self.screen, cor, (eq_x + 5, gy + 28), 4)
+                    eq_x += 16
+
+                # Botões
+                bdet = Btn(x+gw-100, gy+3, 46, 14, "Det.", cor=(35,50,70))
+                bdet.update(mp); bdet.draw(self.screen, self.f_small)
+                self.dyn_btns.append((bdet, ("guarda_detalhe", g.id)))
+
+                bdis = Btn(x+gw-50,  gy+3, 44, 14, "Disp.", cor=(70,25,18))
+                bdis.update(mp); bdis.draw(self.screen, self.f_small)
+                self.dyn_btns.append((bdis, ("demitir_guarda", g.id)))
+
+                y += 42
+                if y > cy + BOTTOM_H - 30:
+                    break
+
+        # Bônus coletivo
+        if game.guardas:
+            ar = game.guardas_ataque_reducao()
+            rb = game.guardas_recuperacao_bonus()
+            self.screen.blit(self.f_small.render(
+                f"Reducao de ataque: {ar*100:.0f}%   Bonus recuperacao: {rb*100:.0f}%",
+                True, GREEN), (x, cy + BOTTOM_H - 20))
+
+        # ── LADO DIREITO — compra e loja ─────────────────────────────────
+        rx2 = OX + split + 6; y2 = cy
+        self.screen.blit(self.f_title.render("CONTRATAR GUARDA", True, LIGHT_BROWN), (rx2, y2)); y2 += 16
+
+        for tier in GUARD_TIERS:
+            cor_t = RARITY_COLORS.get(tier["raridade"], GRAY)
+            pode  = (game.ouro >= tier["preco"] and len(game.guardas) < MAX_GUARDAS)
+            pygame.draw.rect(self.screen, (20,14,8), (rx2, y2, split-12, 22), border_radius=3)
+            pygame.draw.rect(self.screen, cor_t,     (rx2, y2, split-12, 22), 1, border_radius=3)
+            self.screen.blit(self.f_small.render(
+                f"{tier['nome']}  [{tier['attr_range'][0]}-{tier['attr_range'][1]} attrs]",
+                True, cor_t), (rx2+4, y2+4))
+            bcmp = Btn(rx2 + split - 90, y2+2, 80, 18, f"{tier['preco']}g",
+                       cor=(45,70,25) if pode else (35,35,35), disabled=not pode)
+            bcmp.update(mp); bcmp.draw(self.screen, self.f_small)
+            self.dyn_btns.append((bcmp, ("comprar_guarda", tier["tipo"])))
+            y2 += 26
+
+        # Loja de itens de guardas
+        pygame.draw.line(self.screen, PANEL_BDR, (rx2, y2), (rx2+split-12, y2), 1); y2 += 4
+        self.screen.blit(self.f_title.render("LOJA DE EQUIPAMENTOS", True, LIGHT_BROWN), (rx2, y2)); y2 += 14
+
+        if not game.loja_guard_itens:
+            self.screen.blit(self.f_small.render("(sem itens em estoque)", True, DARK_GRAY), (rx2, y2))
+        else:
+            for it in game.loja_guard_itens[:5]:
+                iid   = it["id"]
+                preco = it["preco"]
+                data  = GUARD_ITEMS.get(iid, {})
+                cor_i = RARITY_COLORS.get(data.get("raridade","comum"), GRAY)
+                pode_c= game.ouro >= preco
+                self.screen.blit(self.f_small.render(
+                    f"{data.get('nome',iid)[:22]}  [{data.get('raridade','?')}]",
+                    True, cor_i), (rx2, y2))
+                bci = Btn(rx2 + split - 90, y2-1, 80, 16, f"{preco}g",
+                          cor=(45,70,25) if pode_c else (35,35,35), disabled=not pode_c)
+                bci.update(mp); bci.draw(self.screen, self.f_small)
+                self.dyn_btns.append((bci, ("comprar_guard_item", (iid, preco))))
+                y2 += 16
+
+        # Inventário de guardas
+        n_gi = len(game.inventario_guard_itens)
+        if n_gi:
+            self.screen.blit(self.f_small.render(f"Inventário guardas: {n_gi} itens", True, CYAN),
+                             (rx2, cy + BOTTOM_H - 20))
+
+    # ------------------------------------------------------------------
+    # MODAL: DETALHE DO GUARDA
+    # ------------------------------------------------------------------
+
+    def _draw_guarda_detail(self, mp):
+        game = self.game
+        g    = game.get_guarda(self.guarda_detalhe_id)
+        if not g:
+            self.guarda_detalhe_id = None
+            return
+
+        W, H = 720, 480
+        px   = (SCREEN_WIDTH - W) // 2
+        py   = (SCREEN_HEIGHT - H) // 2
+
+        surf = pygame.Surface((W, H), pygame.SRCALPHA)
+        surf.fill((10, 7, 3, 240))
+        self.screen.blit(surf, (px, py))
+        cor_r = g.cor_raridade()
+        pygame.draw.rect(self.screen, cor_r, (px, py, W, H), 2, border_radius=8)
+
+        # Título
+        gen_str = "Homem" if g.genero == "M" else "Mulher"
+        self.screen.blit(self.f_title.render(
+            f"{g.nome}  —  {gen_str} | Idade {g.idade:.0f} | {g.raridade}",
+            True, cor_r), (px+10, py+8))
+
+        # Col 1: stats
+        COL1_X = px + 10
+        y1     = py + 34
+        self.screen.blit(self.f_small.render("ATRIBUTOS", True, LIGHT_BROWN), (COL1_X, y1)); y1 += 14
+        for lbl, base, ef in [
+            ("Forca",       g.forca,       g.forca_efetiva()),
+            ("Resistencia", g.resistencia, g.resistencia_efetiva()),
+            ("Agilidade",   g.agilidade,   g.agilidade_efetiva()),
+        ]:
+            bonus = ef - base
+            b_txt = f"(+{bonus})" if bonus > 0 else ""
+            self.screen.blit(self.f_small.render(
+                f"{lbl}: {base} → {ef} {b_txt}", True, WHITE), (COL1_X, y1))
+            y1 += 13
+
+        y1 += 6
+        # Contribuição aos guardas
+        self.screen.blit(self.f_small.render("CONTRIBUIÇÃO", True, LIGHT_BROWN), (COL1_X, y1)); y1 += 14
+        self.screen.blit(self.f_small.render(f"Red. Ataques:  -{g.agilidade_efetiva()/400*100:.1f}%", True, GREEN), (COL1_X, y1)); y1 += 13
+        self.screen.blit(self.f_small.render(f"Bon. Recuper.: +{g.forca_efetiva()/300*100:.1f}%", True, CYAN), (COL1_X, y1)); y1 += 13
+        self.screen.blit(self.f_small.render(f"Poder total:    {g.poder_total()}", True, GOLD), (COL1_X, y1)); y1 += 20
+
+        # Col 2: slots de equipamento
+        COL2_X = px + 210
+        y2     = py + 34
+        self.screen.blit(self.f_small.render("EQUIPAMENTOS (clique slot → seleciona)", True, LIGHT_BROWN), (COL2_X, y2)); y2 += 16
+
+        for slot in GUARD_SLOTS:
+            nome_slot = GUARD_SLOT_NOMES.get(slot, slot)
+            iid       = g.equipamentos.get(slot)
+            selecionado = (self.guarda_slot_sel == slot)
+
+            # Cor de fundo
+            slot_cor = DARK_BROWN if not selecionado else (60, 40, 10)
+            pygame.draw.rect(self.screen, slot_cor, (COL2_X, y2, 200, 22), border_radius=4)
+            if selecionado:
+                pygame.draw.rect(self.screen, GOLD, (COL2_X, y2, 200, 22), 1, border_radius=4)
+
+            if iid and iid in GUARD_ITEMS:
+                idata = GUARD_ITEMS[iid]
+                cor_i = RARITY_COLORS.get(idata.get("raridade","comum"), GRAY)
+                self.screen.blit(self.f_small.render(
+                    f"{nome_slot}: {idata['nome'][:16]}", True, cor_i), (COL2_X+4, y2+5))
+                bdeq = Btn(COL2_X+142, y2+3, 54, 16, "Tir.", cor=(70,25,18))
+                bdeq.update(mp); bdeq.draw(self.screen, self.f_small)
+                self.dyn_btns.append((bdeq, ("deseq_guard", (g.id, slot))))
+            else:
+                self.screen.blit(self.f_small.render(f"{nome_slot}: — vazio —", True, DARK_GRAY), (COL2_X+4, y2+5))
+
+            bsel = Btn(COL2_X+2, y2+3, 136, 16, "", cor=(0,0,0,0))  # área clicável invisível
+            bsel.update(mp)
+            self.dyn_btns.append((bsel, ("sel_guard_slot", slot)))
+            y2 += 26
+
+        # Col 3: inventário de guardas filtrado pelo slot selecionado
+        COL3_X = px + 430
+        y3     = py + 34
+        self.screen.blit(self.f_small.render("INVENTÁRIO GUARDAS", True, LIGHT_BROWN), (COL3_X, y3)); y3 += 16
+
+        filtrado = []
+        for iid in game.inventario_guard_itens:
+            if iid in GUARD_ITEMS:
+                if not self.guarda_slot_sel or GUARD_ITEMS[iid]["slot"] == self.guarda_slot_sel:
+                    filtrado.append(iid)
+
+        if not filtrado:
+            self.screen.blit(self.f_small.render("(sem itens compatíveis)", True, DARK_GRAY), (COL3_X, y3))
+        else:
+            inv_w = W - (COL3_X - px) - 10
+            for iid in filtrado[:10]:
+                idata  = GUARD_ITEMS[iid]
+                cor_i  = RARITY_COLORS.get(idata.get("raridade","comum"), GRAY)
+                pygame.draw.rect(self.screen, (18,12,6), (COL3_X, y3, inv_w, 20), border_radius=3)
+                self.screen.blit(self.f_small.render(f"{idata['nome'][:20]}", True, cor_i), (COL3_X+4, y3+4))
+                beq = Btn(COL3_X + inv_w - 52, y3+2, 48, 16, "Equip.", cor=(35,60,22))
+                beq.update(mp); beq.draw(self.screen, self.f_small)
+                self.dyn_btns.append((beq, ("equip_guard", (g.id, iid))))
+                y3 += 24
+
+        # Auto-equipar
+        bae = Btn(COL2_X, py+H-30, 100, 22, "Auto-Equipar", cor=(35,60,22))
+        bae.update(mp); bae.draw(self.screen, self.f_small)
+        self.dyn_btns.append((bae, ("auto_equip_guard", g.id)))
+
+        # Fechar
+        bfch = Btn(px+W-100, py+H-30, 90, 22, "[FECHAR]", cor=(70,20,20), cor_txt=RED)
+        bfch.update(mp); bfch.draw(self.screen, self.f_normal)
+        self.dyn_btns.append((bfch, ("fechar_guarda_detalhe", None)))
+
+        pygame.draw.line(self.screen, PANEL_BDR, (COL2_X-5, py+28), (COL2_X-5, py+H-10), 1)
+        pygame.draw.line(self.screen, PANEL_BDR, (COL3_X-5, py+28), (COL3_X-5, py+H-10), 1)
+
+    # ------------------------------------------------------------------
+    # ABA 9: GERÊNCIA
+    # ------------------------------------------------------------------
+
+    def _tab_gerencia(self, mp, cy):
+        OX   = self.OX
+        game = self.game
+        W    = SCREEN_WIDTH - OX
+        split = W // 2
+
+        # ── LADO ESQUERDO — gerentes contratados ────────────────────────
+        x = OX + 6; y = cy
+        self.screen.blit(self.f_title.render("CAPATAZES CONTRATADOS", True, GOLD), (x, y)); y += 16
+
+        if not game.gerentes:
+            self.screen.blit(self.f_small.render("Nenhum gerente contratado.", True, DARK_GRAY), (x, y))
+            y += 14
+        else:
+            gw = split - 12
+            for g in game.gerentes:
+                cor_r = g.cor_raridade()
+                gy    = y
+                pygame.draw.rect(self.screen, (14,12,6), (x, gy, gw, 44), border_radius=4)
+                pygame.draw.rect(self.screen, cor_r,     (x, gy, gw, 44), 1, border_radius=4)
+
+                # Linha 1: nome + raridade
+                self.screen.blit(self.f_small.render(
+                    f"{g.nome[:20]}  [{g.raridade}]  ef:{g.eficiencia:.0%}",
+                    True, cor_r), (x+4, gy+3))
+
+                # Linha 2: autonomia + tipo
+                auto_nome = MANAGER_AUTONOMIA_NOMES.get(g.autonomia, g.autonomia)
+                self.screen.blit(self.f_small.render(
+                    f"{g.tipo.capitalize()}  |  {auto_nome}  |  {g.acoes_realizadas} acoes",
+                    True, GRAY), (x+4, gy+16))
+
+                # Linha 3: ações/recs
+                self.screen.blit(self.f_small.render(
+                    f"Recs geradas: {g.recomendacoes_geradas}",
+                    True, DARK_GRAY), (x+4, gy+28))
+
+                # Botões
+                bcfg = Btn(x+gw-100, gy+4, 46, 16, "Config", cor=(35,50,70))
+                bcfg.update(mp); bcfg.draw(self.screen, self.f_small)
+                self.dyn_btns.append((bcfg, ("abrir_gerente_modal", g.id)))
+
+                bdem = Btn(x+gw-50, gy+4, 44, 16, "Dem.", cor=(70,25,18))
+                bdem.update(mp); bdem.draw(self.screen, self.f_small)
+                self.dyn_btns.append((bdem, ("demitir_gerente", g.id)))
+
+                y += 48
+                if y > cy + BOTTOM_H - 30:
+                    break
+
+        # ── FILA DE RECOMENDAÇÕES ────────────────────────────────────────
+        if game.gerentes:
+            fila = game.fila_recomendacoes
+            urgencia_cor = {1: GRAY, 2: ORANGE, 3: RED}
+            if not fila:
+                self.screen.blit(self.f_small.render("Nenhuma recomendação pendente.", True, DARK_GRAY),
+                                 (x, y)); y += 13
+            else:
+                self.screen.blit(self.f_small.render(f"RECOMENDAÇÕES ({len(fila)}):", True, LIGHT_BROWN),
+                                 (x, y)); y += 13
+                for i, rec in enumerate(fila[:4]):
+                    if y + 26 > cy + BOTTOM_H - 6:
+                        break
+                    urg  = rec.get("urgencia", 1)
+                    cor  = rec.get("cor", urgencia_cor.get(urg, GRAY))
+                    msg  = rec.get("msg", "")[:55]
+                    pygame.draw.rect(self.screen, (16,12,6), (x, y, split-12, 24), border_radius=3)
+                    pygame.draw.rect(self.screen, cor,       (x, y, split-12, 24), 1, border_radius=3)
+                    self.screen.blit(self.f_small.render(msg, True, cor), (x+4, y+4))
+
+                    # Botão Executar (só se tem acao_tipo)
+                    if rec.get("acao_tipo"):
+                        bex = Btn(x + split - 130, y+4, 56, 16, "Exec.", cor=(35,60,22))
+                        bex.update(mp); bex.draw(self.screen, self.f_small)
+                        self.dyn_btns.append((bex, ("exec_rec", i)))
+
+                    big = Btn(x + split - 70, y+4, 52, 16, "Ign.", cor=(60,25,18))
+                    big.update(mp); big.draw(self.screen, self.f_small)
+                    self.dyn_btns.append((big, ("ignorar_rec", i)))
+
+                    y += 27
+
+        # ── LADO DIREITO — contratar ─────────────────────────────────────
+        rx2 = OX + split + 6; y2 = cy
+        self.screen.blit(self.f_title.render("CONTRATAR GERENTE", True, LIGHT_BROWN), (rx2, y2)); y2 += 16
+
+        slots_livres = MAX_GERENTES - len(game.gerentes)
+        self.screen.blit(self.f_small.render(
+            f"Slots: {len(game.gerentes)}/{MAX_GERENTES}",
+            True, CYAN), (rx2, y2)); y2 += 14
+
+        for tier in MANAGER_TIERS:
+            cor_t = RARITY_COLORS.get(tier["raridade"], GRAY)
+            pode  = (game.ouro >= tier["preco"] and slots_livres > 0)
+            already = any(g.tipo == tier["tipo"] for g in game.gerentes)
+            disabled = not pode or already
+
+            rw = split - 16
+            pygame.draw.rect(self.screen, (20,14,8), (rx2, y2, rw, 30), border_radius=3)
+            pygame.draw.rect(self.screen, cor_t,     (rx2, y2, rw, 30), 1, border_radius=3)
+
+            self.screen.blit(self.f_small.render(
+                f"{tier['nome']}  (ef {tier['eficiencia']:.0%})", True, cor_t), (rx2+4, y2+4))
+            self.screen.blit(self.f_small.render(tier["desc"][:45], True, DARK_GRAY), (rx2+4, y2+17))
+
+            btn_lbl = "Já tem" if already else f"{tier['preco']//1000}k g"
+            bcmp = Btn(rx2 + rw - 74, y2+6, 68, 18, btn_lbl,
+                       cor=(45,70,25) if pode and not already else (35,35,35), disabled=disabled)
+            bcmp.update(mp); bcmp.draw(self.screen, self.f_small)
+            self.dyn_btns.append((bcmp, ("contratar_gerente", tier["tipo"])))
+
+            y2 += 34
+
+        # Info geral
+        if game.gerentes:
+            pygame.draw.line(self.screen, PANEL_BDR, (rx2, y2), (rx2+split-16, y2), 1); y2 += 6
+            total_recs = sum(g.recomendacoes_geradas for g in game.gerentes)
+            total_acao = sum(g.acoes_realizadas       for g in game.gerentes)
+            self.screen.blit(self.f_small.render(
+                f"Total recomendações: {total_recs}  |  Ações auto: {total_acao}",
+                True, GRAY), (rx2, y2))
+
+    # ------------------------------------------------------------------
+    # MODAL: CONFIG DO GERENTE
+    # ------------------------------------------------------------------
+
+    def _draw_gerente_modal(self, mp):
+        game = self.game
+        g    = game.get_gerente(self.gerente_modal_id)
+        if not g:
+            self.gerente_modal_id = None
+            return
+
+        W, H = 680, 480
+        px   = (SCREEN_WIDTH - W) // 2
+        py   = (SCREEN_HEIGHT - H) // 2
+
+        surf = pygame.Surface((W, H), pygame.SRCALPHA)
+        surf.fill((10, 8, 2, 245))
+        self.screen.blit(surf, (px, py))
+        cor_r = g.cor_raridade()
+        pygame.draw.rect(self.screen, cor_r, (px, py, W, H), 2, border_radius=8)
+
+        # Título
+        self.screen.blit(self.f_title.render(
+            f"{g.nome}  [{g.raridade}]  ef:{g.eficiencia:.0%}",
+            True, cor_r), (px+10, py+8))
+
+        # ── AUTONOMIA ──────────────────────────────────────────────────
+        y = py + 30
+        self.screen.blit(self.f_small.render("MODO DE AUTONOMIA:", True, LIGHT_BROWN), (px+10, y)); y += 14
+        for modo in MANAGER_AUTONOMIA:
+            cor_btn = GOLD if g.autonomia == modo else (35,35,35)
+            btn_auto = Btn(px+10 + MANAGER_AUTONOMIA.index(modo)*140, y, 132, 18,
+                           MANAGER_AUTONOMIA_NOMES[modo], cor=cor_btn)
+            btn_auto.update(mp); btn_auto.draw(self.screen, self.f_small)
+            self.dyn_btns.append((btn_auto, ("set_autonomia", (g.id, modo))))
+        y += 24
+
+        pygame.draw.line(self.screen, PANEL_BDR, (px+8, y), (px+W-8, y), 1); y += 6
+
+        # ── CONFIGURAÇÕES ──────────────────────────────────────────────
+        # 2 colunas
+        C1X = px + 10
+        C2X = px + W // 2 + 10
+        cy1 = y
+        cy2 = y
+
+        def toggle_row(cx, cy, lbl, attr, val):
+            """Desenha linha toggle. Retorna cy + altura."""
+            ativo = getattr(g, attr)
+            cor   = GREEN if ativo else DARK_GRAY
+            self.screen.blit(self.f_small.render(lbl, True, WHITE), (cx, cy+2))
+            btxt = "[ON]" if ativo else "[OFF]"
+            bcor = (30,60,22) if ativo else (50,20,20)
+            btn = Btn(cx + 200, cy, 44, 14, btxt, cor=bcor)
+            btn.update(mp); btn.draw(self.screen, self.f_small)
+            self.dyn_btns.append((btn, ("toggle_cfg", (g.id, attr))))
+            return cy + 18
+
+        def val_row(cx, cy, lbl, attr, mn, mx, step):
+            """Linha com valor numérico ajustável. Retorna cy + altura."""
+            val = getattr(g, attr)
+            self.screen.blit(self.f_small.render(f"{lbl}: {val}", True, WHITE), (cx, cy+2))
+            bm = Btn(cx + 200, cy, 18, 14, "-", cor=(60,30,20))
+            bp = Btn(cx + 220, cy, 18, 14, "+", cor=(30,60,20))
+            bm.update(mp); bm.draw(self.screen, self.f_small)
+            bp.update(mp); bp.draw(self.screen, self.f_small)
+            self.dyn_btns.append((bm, ("adj_cfg", (g.id, attr, -step, mn, mx))))
+            self.dyn_btns.append((bp, ("adj_cfg", (g.id, attr,  step, mn, mx))))
+            return cy + 18
+
+        # Coluna 1: venda / descanso
+        self.screen.blit(self.f_small.render("VENDA AUTOMÁTICA", True, GOLD), (C1X, cy1)); cy1 += 14
+        cy1 = toggle_row(C1X, cy1, "Vender idosos",   "cfg_vender_idosos",  None)
+        cy1 = val_row   (C1X, cy1, "Idade mín. venda","cfg_vender_idade_min", 30, 80, 5)
+        cy1 = toggle_row(C1X, cy1, "Vender fracos",   "cfg_vender_fracos",   None)
+        cy1 = val_row   (C1X, cy1, "Attr máx (fraco)","cfg_vender_attr_max",  5, 60, 5)
+        cy1 = toggle_row(C1X, cy1, "Vender doentes",  "cfg_vender_doentes",  None)
+        cy1 += 6
+        self.screen.blit(self.f_small.render("DESCANSO", True, GOLD), (C1X, cy1)); cy1 += 14
+        cy1 = toggle_row(C1X, cy1, "Descanso auto",   "cfg_descanso_auto",   None)
+        cy1 = val_row   (C1X, cy1, "Stamina mín.","cfg_descanso_stamina",    5, 40, 5)
+
+        # Coluna 2: compra / outros
+        self.screen.blit(self.f_small.render("COMPRA AUTOMÁTICA", True, GOLD), (C2X, cy2)); cy2 += 14
+        cy2 = toggle_row(C2X, cy2, "Comprar auto",    "cfg_comprar_auto",    None)
+        cy2 = val_row   (C2X, cy2, "Attr mín. compra","cfg_comprar_attr_min", 20, 80, 5)
+        cy2 = val_row   (C2X, cy2, "Idade máx. compra","cfg_comprar_idade_max",18, 60, 2)
+        cy2 += 6
+        self.screen.blit(self.f_small.render("OUTROS", True, GOLD), (C2X, cy2)); cy2 += 14
+        cy2 = toggle_row(C2X, cy2, "Auto-equip servos","cfg_equip_auto",     None)
+        cy2 = toggle_row(C2X, cy2, "Auto-equip guardas","cfg_guardas_auto",  None)
+
+        # ── ESTATÍSTICAS ───────────────────────────────────────────────
+        ey = py + H - 50
+        pygame.draw.line(self.screen, PANEL_BDR, (px+8, ey), (px+W-8, ey), 1); ey += 6
+        self.screen.blit(self.f_small.render(
+            f"Intervalo análise: {g.check_interval:.0f}s  |  "
+            f"Recomendações: {g.recomendacoes_geradas}  |  "
+            f"Ações auto: {g.acoes_realizadas}",
+            True, GRAY), (px+10, ey))
+
+        # ── FECHAR ─────────────────────────────────────────────────────
+        bfch = Btn(px+W-100, py+H-28, 90, 22, "[FECHAR]", cor=(70,20,20), cor_txt=RED)
+        bfch.update(mp); bfch.draw(self.screen, self.f_normal)
+        self.dyn_btns.append((bfch, ("fechar_gerente_modal", None)))
+
+    # ------------------------------------------------------------------
+    # MODAL: VENDEDOR AMBULANTE
+    # ------------------------------------------------------------------
+
+    def _draw_vendedor_modal(self, mp):
+        # Bloqueio de fundo (Overlay)
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 190))
+        self.screen.blit(overlay, (0, 0))
+
+        game = self.game
+        v    = game.vendedor_atual
+        if not v:
+            self.show_vendedor = False
+            return
+
+        qual_cor = {
+            "barato": GRAY, "raro": BLUE, "ruim": RED, "maldito": PURPLE,
+        }.get(v["qualidade"], GOLD)
+        qual_nomes = {
+            "barato": "Mercador de Bugigangas",
+            "raro":   "Comerciante Raro",
+            "ruim":   "Mascate Duvidoso",
+            "maldito":"Vendedor das Sombras",
+        }
+
+        W, H  = 560, 310
+        px    = (SCREEN_WIDTH - W) // 2
+        py    = (SCREEN_HEIGHT - H) // 2
+
+        surf = pygame.Surface((W, H), pygame.SRCALPHA)
+        surf.fill((8, 5, 14, 245))
+        self.screen.blit(surf, (px, py))
+        pygame.draw.rect(self.screen, qual_cor, (px, py, W, H), 2, border_radius=8)
+
+        self.screen.blit(self.f_title.render(
+            f"  {qual_nomes.get(v['qualidade'],'Vendedor')}  —  {v['timer']:.0f}s restantes",
+            True, qual_cor), (px+10, py+8))
+        
+        # Saldo de Ouro Interno
+        self.screen.blit(self.f_normal.render(f"Seu Ouro: {game.ouro}g", True, GOLD), (px+W-180, py+10))
+
+        if not v["itens"]:
+            self.screen.blit(self.f_normal.render("Sem itens disponíveis.", True, GRAY), (px+20, py+60))
+        else:
+            item_w = (W - 20) // len(v["itens"])
+            all_vendor_items = {**ITEMS, **GUARD_ITEMS}
+            for i, it in enumerate(v["itens"]):
+                data   = all_vendor_items.get(it["id"], {})
+                cor_i  = RARITY_COLORS.get(data.get("raridade","comum"), GRAY)
+                ix     = px + 10 + i * item_w
+                iy     = py + 34
+
+                pygame.draw.rect(self.screen, (20,14,30), (ix, iy, item_w-8, H-70), border_radius=6)
+                pygame.draw.rect(self.screen, cor_i,      (ix, iy, item_w-8, H-70), 1, border_radius=6)
+
+                nome = data.get("nome", it["id"])
+                for j, parte in enumerate(self._wrap(nome, item_w-16, self.f_small)):
+                    self.screen.blit(self.f_small.render(parte, True, cor_i), (ix+4, iy+4+j*13))
+
+                tipo_tag = "[GUARDA]" if it["tipo"]=="guard" else "[SERVO]"
+                self.screen.blit(self.f_small.render(tipo_tag, True, CYAN), (ix+4, iy+34))
+                rar = data.get("raridade","?")
+                self.screen.blit(self.f_small.render(rar, True, cor_i), (ix+4, iy+48))
+
+                # Bônus
+                bonus_y = iy + 62
+                for attr, val in list(data.get("bonus",{}).items())[:4]:
+                    self.screen.blit(self.f_small.render(f"{attr}:{val:+d}", True, GREEN if val>0 else RED),
+                                     (ix+4, bonus_y)); bonus_y += 12
+
+                pode_c = game.ouro >= it["preco"]
+                bcv = Btn(ix+4, iy+H-110, item_w-16, 22, f"Comprar {it['preco']}g",
+                          cor=(45,70,22) if pode_c else (35,35,35), disabled=not pode_c)
+                bcv.update(mp); bcv.draw(self.screen, self.f_normal)
+                self.dyn_btns.append((bcv, ("comprar_vendedor", (it["id"], it["preco"]))))
+
+        bfch = Btn(px+W-100, py+H-30, 90, 22, "[FECHAR]", cor=(70,20,20), cor_txt=RED)
+        bfch.update(mp); bfch.draw(self.screen, self.f_normal)
+        self.dyn_btns.append((bfch, ("fechar_vendedor", None)))
+
+    @staticmethod
+    def _wrap(text: str, max_px: int, font) -> list[str]:
+        words  = text.split()
+        lines  = []
+        line   = ""
+        for w in words:
+            test = line + w + " "
+            if font.size(test)[0] <= max_px:
+                line = test
+            else:
+                if line:
+                    lines.append(line.strip())
+                line = w + " "
+        if line:
+            lines.append(line.strip())
+        return lines or [""]
+
+    # ------------------------------------------------------------------
     # TOOLTIP DO ESCRAVO
     # ------------------------------------------------------------------
 
@@ -1883,6 +2770,16 @@ class Renderer:
 
         # Se o modal de detalhe estiver aberto, ESC fecha
         if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+            if self.show_vendedor:
+                self.show_vendedor = False
+                return
+            if self.gerente_modal_id is not None:
+                self.gerente_modal_id = None
+                return
+            if self.guarda_detalhe_id is not None:
+                self.guarda_detalhe_id = None
+                self.guarda_slot_sel   = None
+                return
             if self.slave_detalhe_id is not None:
                 self.slave_detalhe_id = None
                 self.detalhe_slot_sel = None
@@ -1925,7 +2822,7 @@ class Renderer:
             if btn.clicked(ev):
                 self.tab = i
 
-        for btn, (acao, param) in self.dyn_btns:
+        for btn, (acao, param) in reversed(self.dyn_btns):
             if btn.clicked(ev):
                 self._exec(acao, param)
                 break
@@ -2053,6 +2950,101 @@ class Renderer:
             iid, preco = param
             ok, msg = game.comprar_item_loja(iid, preco)
             game.log_add(msg, GREEN if ok else RED)
+
+        # ── Guardas ──────────────────────────────────────────────────────
+        elif acao == "guarda_detalhe":
+            self.guarda_detalhe_id = param
+            self.guarda_slot_sel   = None
+
+        elif acao == "fechar_guarda_detalhe":
+            self.guarda_detalhe_id = None
+            self.guarda_slot_sel   = None
+
+        elif acao == "sel_guard_slot":
+            self.guarda_slot_sel = param if self.guarda_slot_sel != param else None
+
+        elif acao == "comprar_guarda":
+            ok, msg = game.comprar_guarda(param)
+            game.log_add(msg, CYAN if ok else RED)
+
+        elif acao == "demitir_guarda":
+            ok, msg = game.demitir_guarda(param)
+            game.log_add(msg, ORANGE if ok else RED)
+            if ok and self.guarda_detalhe_id == param:
+                self.guarda_detalhe_id = None
+
+        elif acao == "equip_guard":
+            gid, iid = param
+            ok, msg  = game.equipar_item_guarda(gid, iid)
+            game.log_add(msg, CYAN if ok else RED)
+
+        elif acao == "deseq_guard":
+            gid, slot = param
+            ok, msg   = game.desequipar_item_guarda(gid, slot)
+            game.log_add(msg, GRAY if ok else RED)
+
+        elif acao == "auto_equip_guard":
+            ok, msg = game.auto_equipar_guarda(param)
+            game.log_add(msg, GREEN if ok else GRAY)
+
+        elif acao == "comprar_guard_item":
+            iid, preco = param
+            ok, msg    = game.comprar_item_guarda_loja(iid, preco)
+            game.log_add(msg, GOLD if ok else RED)
+
+        # ── Vendedor ─────────────────────────────────────────────────────
+        elif acao == "abrir_vendedor":
+            self.show_vendedor = True
+
+        elif acao == "fechar_vendedor":
+            self.show_vendedor = False
+
+        elif acao == "comprar_vendedor":
+            iid, preco = param
+            ok, msg    = game.comprar_item_vendedor(iid, preco)
+            game.log_add(msg, GOLD if ok else RED)
+
+        # ── Gerentes ──────────────────────────────────────────────────────
+        elif acao == "contratar_gerente":
+            ok, msg = game.contratar_gerente(param)
+            game.log_add(msg, GOLD if ok else RED)
+
+        elif acao == "demitir_gerente":
+            ok, msg = game.demitir_gerente(param)
+            game.log_add(msg, ORANGE if ok else RED)
+            if ok and self.gerente_modal_id == param:
+                self.gerente_modal_id = None
+
+        elif acao == "abrir_gerente_modal":
+            self.gerente_modal_id = param
+
+        elif acao == "fechar_gerente_modal":
+            self.gerente_modal_id = None
+
+        elif acao == "set_autonomia":
+            gid, modo = param
+            ok, msg = game.set_autonomia_gerente(gid, modo)
+            game.log_add(msg, CYAN if ok else RED)
+
+        elif acao == "toggle_cfg":
+            gid, attr = param
+            g = game.get_gerente(gid)
+            if g and hasattr(g, attr):
+                setattr(g, attr, not getattr(g, attr))
+
+        elif acao == "adj_cfg":
+            gid, attr, delta, mn, mx = param
+            g = game.get_gerente(gid)
+            if g and hasattr(g, attr):
+                setattr(g, attr, max(mn, min(mx, getattr(g, attr) + delta)))
+
+        elif acao == "exec_rec":
+            ok, msg = game.executar_recomendacao(param)
+            game.log_add(msg, GREEN if ok else RED)
+
+        elif acao == "ignorar_rec":
+            game.ignorar_recomendacao(param)
+            game.log_add("Recomendação ignorada.", GRAY)
 
         elif acao == "inv_toggle_sel":
             inv_idx, iid = param

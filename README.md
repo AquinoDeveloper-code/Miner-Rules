@@ -1,47 +1,50 @@
 # Mina dos Servos Eternos
 
-Idle game de gerenciamento de mina com elementos de RPG, progressão incremental, sistema familiar e eventos sistêmicos. O jogador administra servos, mineração, upgrades, reprodução, equipamentos, doenças, aposentadoria e prestígio.
+Idle game de gerenciamento de mina com elementos de RPG, progressão incremental, sistema familiar, logística de entregas, guardas e automação via gerentes. O jogador administra servos, mineração, upgrades, reprodução, equipamentos, doenças, aposentadoria e prestígio.
 
-## Novas Funcionalidades (Última atualização)
+## Novas Funcionalidades (v1.3.0)
 
-### ⏰ Cronologia e Histórico
-- **Contador de Tempo**: Ano e Mês exibidos na barra superior em tempo real (1 Ano = 50s de jogo)
-- **Aba Histórico**: Timeline visual com os eventos mais marcantes (nascimentos, mortes, aposentadorias, itens raros) com timestamp cronológico
+### 🚚 Sistema de Entrega com Ataques
+- Recursos minerados percorrem um **trajeto real** antes de chegar ao cofre (tempo proporcional à velocidade do servo + nível da mina)
+- Quatro tipos de atacante: Alcateia de Lobos, Urso Gigante, Ladrões, Horda de Orcs — cada um com taxa de recuperação diferente
+- Fila de entregas com **barras de progresso** no painel direito
+- Entregas em trânsito ao salvar são concluídas automaticamente ao reabrir
 
-### 😄 Sistema de Humor dos Servos
-- Cada servo possui um **estado de humor** que modifica todos os seus atributos efetivos
-- 8 estados: `Muito Feliz`, `Satisfeito`, `Normal`, `Cansado`, `Muito Cansado`, `Doente`, `Faminto`, `Amaldiçoado`
-- Efeito vai de **–20%** (Doente/Faminto) a **+20%** (Muito Feliz)
-- Status visível na **lista de servos** e no **modal de detalhes**
+### 🛡️ Sistema de Guardas
+- Nova aba **Guardas** para contratar e gerenciar protetores
+- 5 tiers (Velho → Lendário) com atributos de Força, Resistência e Agilidade
+- Contribuição coletiva: reduz chance de ataque (até 60%) e aumenta recuperação (até 35%)
+- 6 slots de equipamento por guarda (17 itens disponíveis)
+- Modal de detalhe com auto-equip e loja de itens de guarda
+- Guardas são **preservados no Prestígio**
 
-### ♥ Sistema Familiar Aprimorado
-- **Lua de Mel (9 meses de jogo)**: ao formar um par, ambos ganham +20% em todos os atributos e +30% em fertilidade por 37.5s de jogo
-- **Cooldown de Reprodução (2 anos)**: após um nascimento, pai e mãe ficam 100s de jogo sem poder ter outro filho
-- Status de lua de mel e cooldown exibidos na lista de servos e no modal
+### 🧳 Vendedor Ambulante
+- Vendedores aparecem aleatoriamente com itens para servos e guardas
+- 4 tipos de qualidade: Bugigangas, Raro, Duvidoso, Sombras
+- Notificação e botão de acesso no painel direito com timer visível
 
-### ⚡ Auto-Equip por Raridade
-- Devolve itens inferiores ao inventário automaticamente
-- **⚡ Auto-Equip Geral**: Botão na lista central que otimiza o equipamento de todos os mineradores vivos simultaneamente
+### 🧠 Sistema de Gerentes (Capatazes)
+- Nova aba **Gerência** com 4 tiers: Júnior (15k) → Lendário (1M de ouro)
+- 3 modos de autonomia: **Só Recomenda**, **Semi-Auto**, **Automático**
+- 12 tipos de recomendação (stamina, doenças, maldições, compras, equipamentos, guardas, mercado negro…)
+- Fila de recomendações com botões **Executar** e **Ignorar**
+- Modal de configuração por gerente com todos os critérios ajustáveis
+- Gerentes são **preservados no Prestígio**
 
-### 🏪 Mercador de Itens
-- Painel **Mercador de Itens** na aba **Loja** (canto direito)
-- 3 a 5 itens aleatórios por sessão — equipamentos e consumíveis
-- Preço = 2× valor base da raridade
-- **Reseta a cada 5 minutos de jogo** (timer exibido)
+### ⚖️ Correção de Mortes
+- Taxa de morte por acidente reduzida ~12× — mortes por acidente muito menos frequentes, mortes por velhice mais representadas
 
-### 💰 Rebalanceamento de Upgrades
-- Custos dos upgrades de estrutura aumentados drasticamente (até **×60** no nível máximo)
-- Progressão: Nível 1 = ~3.000g, Nível 4 = ~600.000g
+---
 
-### 🛌 Auto-Retorno do Repouso
-- Servo em repouso com **stamina = 100%** volta ao trabalho automaticamente
-- Botão manual **Voltar à Mina** disponível com > 10% de stamina
+## Funcionalidades anteriores (v1.2.0)
 
-### 📋 Status no Modal de Detalhes
-- [MORTO] com causa da morte exibido em vermelho
-- [APOSENTADO] exibido em amarelo
-- Timer de Lua de Mel e Cooldown de reprodução visíveis
-- **Polimento UI**: Log com wrapping automático, Top Bar fixa e Bordas por Raridade (Épico/Lendário)
+- **Sistema de Humor**: 8 estados (±20% nos atributos)
+- **Sistema Familiar**: Lua de Mel (9 meses) + Cooldown de reprodução (2 anos)
+- **Auto-Equip por raridade** individual e geral
+- **Mercador de Itens** na aba Loja (reseta a cada 5 min)
+- **Cronologia**: Ano e Mês na barra superior; aba **Histórico** com timeline
+- **Auto-Retorno do Repouso** ao atingir 100% de stamina
+- **Inventário** com deleção em massa e tooltips comparativos
 
 ## Estrutura atual
 
@@ -51,18 +54,25 @@ minerRules/
 ├── admin.py
 ├── README.md
 ├── MANUAL.md
+├── CHANGELOG.md
 ├── tests/
 └── src/
     ├── entrypoints/
     ├── contexts/
     │   ├── shared/
+    │   │   └── constants.py       # todos os catálogos e constantes
     │   ├── configuration/
     │   └── gameplay/
-    │       ├── domain/        # Escravo, humor, breeding
-    │       ├── application/   # GameManager, histórico, loja_itens
+    │       ├── domain/
+    │       │   ├── slave.py       # Escravo, humor, breeding
+    │       │   ├── guard.py       # Delivery, Guarda
+    │       │   └── manager.py     # Gerente, analisar()
+    │       ├── application/
+    │       │   └── game_manager.py  # orquestrador principal
     │       └── infrastructure/
     └── ui/
-        ├── pygame/            # Renderer, log clip, painel mercador
+        ├── pygame/
+        │   └── renderer.py        # UI completa, 10 abas
         └── admin/
 ```
 
@@ -79,31 +89,37 @@ Painel administrativo:
 python admin.py
 ```
 
+## Abas disponíveis
+
+| Aba | Função |
+|-----|--------|
+| `Loja` | Comprar servos + Mercador de Itens |
+| `Upgrades` | Melhorias da mina |
+| `Breeding` | Pares ativos e reprodução |
+| `Mercado` | Vender recursos |
+| `Prestígio` | Reset com bônus permanentes |
+| `Conquistas` | Metas desbloqueadas |
+| `Histórico` | Timeline de eventos marcantes |
+| `Inventário` | Gerenciar itens coletados |
+| `Guardas` | Contratar, equipar e gerenciar guardas |
+| `Gerência` | Capatazes, recomendações e automação |
+
 ## Atalhos e Controles
 
 | Ação | Como fazer |
 |------|-----------|
 | Scroll no log | Roda do mouse sobre a coluna EVENTOS |
-| Detalhe do servo | Botão `Det.` na lista ou clique no card da mina |
-| Formar par | Botão `Par` em um M, depois `Par` em um F |
-| Auto-equip | Modal do servo → `⚡ Auto-Equip` |
-| Auto-equip Geral | Topo da Lista de Servos → `⚡ AUTO-EQUIP GERAL` |
-| Comprar item | Aba Loja → painel "Mercador de Itens" |
+| Fechar modal | ESC (cascata: Vendedor → Gerente → Guarda → Servo) |
+| Detalhe do servo | Botão `Det.` na lista |
+| Formar par | `Par` em M, depois `Par` em F |
+| Auto-equip servo | Modal do servo → `⚡ Auto-Equip` |
+| Auto-equip Geral | Topo da lista → `⚡ AUTO-EQUIP GERAL` |
+| Detalhe do guarda | Aba Guardas → `Det.` |
+| Config do gerente | Aba Gerência → `Config` |
+| Executar rec. | Aba Gerência → `Exec.` na recomendação |
+| Vendedor Ambulante | Painel direito → botão Vendedor |
 | Ver histórico | Aba `Histórico` |
 | Ver inventário | Aba `Inventário` |
-
-## Abas disponíveis
-
-| Aba | Função |
-|-----|--------|
-| `Loja` | Comprar servos + **Mercador de Itens** |
-| `Upgrades` | Melhorias da mina |
-| `Breeding` | Pares ativos |
-| `Mercado` | Vender recursos |
-| `Prestígio` | Reset com bônus |
-| `Conquistas` | Metas desbloqueadas |
-| `Histórico` | **Timeline de eventos marcantes** |
-| `Inventário` | Gerenciar itens coletados |
 
 ## Persistência
 
@@ -120,3 +136,4 @@ python3 -m unittest discover -s tests -v
 ## Documentação detalhada
 
 O manual completo está em [MANUAL.md](MANUAL.md).
+O histórico de versões está em [CHANGELOG.md](CHANGELOG.md).

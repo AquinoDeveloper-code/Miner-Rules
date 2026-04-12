@@ -6,8 +6,8 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame
 
-from game_manager import GameManager
-from renderer import Renderer
+from src.contexts.gameplay.application.game_manager import GameManager
+from src.ui.pygame.renderer import Renderer
 from tests.support import TempHomeTestCase
 
 
@@ -44,7 +44,7 @@ class RendererTests(TempHomeTestCase):
 
         self.assertNotEqual(widths_before, widths_after)
         self.assertEqual(sum(widths_after), self.screen.get_width())
-        self.assertEqual(self.renderer.r_bottom.bottom, self.screen.get_height() - self.renderer.r_log.height)
+        self.assertEqual(self.renderer.r_bottom.bottom, self.screen.get_height())
 
     def test_exec_buy_offer_uses_offer_id(self):
         self.game.ouro = 100_000

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from app_paths import get_app_legacy_save_path, get_save_path
-from game_manager import GameManager
+from src.contexts.configuration.infrastructure.app_paths import get_app_legacy_save_path, get_save_path
+from src.contexts.gameplay.application.game_manager import GameManager
 from tests.support import TempHomeTestCase
 
 
