@@ -91,7 +91,7 @@ class GameManagerTests(TempHomeTestCase):
     def test_equipment_and_consumable_flows(self):
         game = self.make_game()
         servo = game.escravos[0]
-        game.inventario_itens = ["pic_ferro", "pic_maldita", "reza_simples", "pocao_cura"]
+        game.inventario_itens = [{"id": i, "added_at": 0.0} for i in ["pic_ferro", "pic_maldita", "reza_simples", "pocao_cura"]]
 
         ok, _ = game.equipar_item(servo.id, "pic_ferro")
         self.assertTrue(ok)
@@ -101,7 +101,7 @@ class GameManagerTests(TempHomeTestCase):
         self.assertTrue(ok)
         self.assertEqual(servo.equipamentos["picareta"], "pic_maldita")
         self.assertGreater(servo.maldicoes["picareta"], 0.0)
-        self.assertIn("pic_ferro", game.inventario_itens)
+        self.assertIn("pic_ferro", [it["id"] for it in game.inventario_itens])
 
         ok, msg = game.desequipar_item(servo.id, "picareta")
         self.assertFalse(ok)
@@ -113,7 +113,7 @@ class GameManagerTests(TempHomeTestCase):
 
         ok, _ = game.desequipar_item(servo.id, "picareta")
         self.assertTrue(ok)
-        self.assertIn("pic_maldita", game.inventario_itens)
+        self.assertIn("pic_maldita", [it["id"] for it in game.inventario_itens])
 
         servo.doente = True
         servo.doenca_timer = 12.0
@@ -220,7 +220,7 @@ class GameManagerTests(TempHomeTestCase):
     def test_prestige_keeps_permanent_progress_and_resets_run_state(self):
         game = self.make_game(prestige_gold_req=500.0)
         game.stats["ouro_total"] = 600.0
-        game.inventario_itens = ["amu_sorte"]
+        game.inventario_itens = [{"id": "amu_sorte", "added_at": 0.0}]
         game.ouro = 2_000
         game.conquistas.add("primeiro")
 
@@ -231,7 +231,7 @@ class GameManagerTests(TempHomeTestCase):
         self.assertEqual(game.almas_eternas, 2)
         self.assertEqual(game.bonus_prestigio, 1.0 + PRESTIGE_BONUS_STEP)
         self.assertEqual(game.ouro, 140)
-        self.assertEqual(game.inventario_itens, ["amu_sorte"])
+        self.assertEqual([it["id"] for it in game.inventario_itens], ["amu_sorte"])
         self.assertEqual(len(game.escravos), 1)
         self.assertIn("primeiro", game.conquistas)
 
@@ -301,7 +301,7 @@ class GameManagerTests(TempHomeTestCase):
         femea.par_id = macho.id
         game.ouro = 4321.0
         game.inventario["Diamante"] = 3
-        game.inventario_itens = ["amu_forca"]
+        game.inventario_itens = [{"id": "amu_forca", "added_at": 88.0}]
         game.nivel_mina = 2
         game.upgrades["ferramentas"] = 1
         game.upgrades["ventilacao"] = 2
@@ -322,7 +322,7 @@ class GameManagerTests(TempHomeTestCase):
         self.assertTrue(loaded.load())
         self.assertEqual(loaded.ouro, 4321.0)
         self.assertEqual(loaded.inventario["Diamante"], 3)
-        self.assertEqual(loaded.inventario_itens, ["amu_forca"])
+        self.assertEqual([it["id"] for it in loaded.inventario_itens], ["amu_forca"])
         self.assertEqual(loaded.nivel_mina, 2)
         self.assertEqual(loaded.upgrades["ventilacao"], 2)
         self.assertEqual(loaded.ui_config["center_factor"], 1.25)
@@ -338,3 +338,43 @@ class GameManagerTests(TempHomeTestCase):
         self.assertEqual(loaded.velocidade, 4)
         self.assertEqual(loaded.custo_refresco, 75)
         self.assertGreater(len(loaded.loja), 0)
+
+    def test_mortality_logging(self):
+        game = self.make_game()
+        servo = game.escravos[0]
+        
+        game._on_morte(servo, "Acidente")
+        self.assertEqual(len(game.mortalidade_history), 1)
+        self.assertEqual(game.mortalidade_history[0]["causa"], "Acidente")
+        self.assertEqual(game.mortalidade_history[0]["nome"], servo.nome)
+
+    def test_inventory_item_expiration(self):
+        game = self.make_game()
+        # Adiciona item com tempo antigo
+        game.inventario_itens = [{"id": "pic_ferro", "added_at": 0.0}]
+        game.tempo_jogo = 100.0
+        
+        # 100s < 120s -> deve ficar
+        game._verificar_expiracao_itens()
+        self.assertEqual(len(game.inventario_itens), 1)
+        
+        # 130s > 120s -> deve expirar
+        game.tempo_jogo = 130.0
+        game._verificar_expiracao_itens()
+        self.assertEqual(len(game.inventario_itens), 0)
+
+    def test_inventory_sanitization_legacy_support(self):
+        game = self.make_game()
+        # Simula save antigo com strings
+        game.inventario_itens = ["pic_ferro", "amu_sorte"]
+        game.tempo_jogo = 50.0
+        
+        game._sanitizar_inventario()
+        
+        self.assertIsInstance(game.inventario_itens[0], dict)
+        self.assertEqual(game.inventario_itens[0]["id"], "pic_ferro")
+        self.assertEqual(game.inventario_itens[0]["added_at"], 50.0)
+
+if __name__ == "__main__":
+    import unittest
+    unittest.main()

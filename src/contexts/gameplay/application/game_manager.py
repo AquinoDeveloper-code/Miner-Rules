@@ -64,8 +64,8 @@ class GameManager:
         # Inventário de recursos
         self.inventario = {r: 0 for r in RESOURCE_ORDER}
 
-        # Inventário de itens (lista de item_ids)
-        self.inventario_itens: list[str] = []
+        # Inventário de itens (lista de dicionários para expiração)
+        self.inventario_itens: list[dict] = [] 
 
         # Mina
         self.nivel_mina = 0
@@ -102,6 +102,9 @@ class GameManager:
 
         # Notificação de evento modal
         self.notificacao: dict | None = None
+        
+        # Recomendação importante pendente (Pop-up do Gerente)
+        self.rec_importante_pendente: dict | None = None
 
         # Mercado negro
         self.mercado_negro       = False
@@ -112,6 +115,10 @@ class GameManager:
         
         # Histórico timeline de eventos marcantes
         self.historico: list[tuple[float, str]] = []
+
+        # Central de Notificações (Novo sistema de histórico persistente)
+        self.notificacoes_history: list[dict] = []
+        self._notif_id_counter = 0
         
         # Loja de Itens Equips/Consumiveis
         self.loja_itens: list[dict] = []
@@ -119,7 +126,7 @@ class GameManager:
 
         # Sistema de Guardas
         self.guardas: list[Guarda] = []
-        self.inventario_guard_itens: list[str] = []
+        self.inventario_guard_itens: list[dict] = []
         self.loja_guard_itens: list[dict] = []
         self.loja_guard_itens_timer = 0.0
 
@@ -133,7 +140,8 @@ class GameManager:
         # Sistema de Gerentes
         self.gerentes: list[Gerente] = []
         self.fila_recomendacoes: list[dict] = []
-        self._t_gerentes: dict[int, float] = {}   # {gerente.id: timer_restante}
+        self._t_gerentes: dict[int, float] = {}
+        self.mortalidade_history: list[dict] = []
 
         # Estatísticas permanentes
         self.stats = {
@@ -148,6 +156,8 @@ class GameManager:
 
         # Conquistas desbloqueadas
         self.conquistas: set = set()
+
+        self._sanitizar_inventario()
 
         # Prestígio
         self.prestigios      = 0
@@ -336,6 +346,9 @@ class GameManager:
             self._t_evento = agora_real
             self._tentar_evento()
 
+        # Verificação de expiração de itens (2 minutos = 120s)
+        self._verificar_expiracao_itens()
+
         # Loja de Itens (reseta a cada 5 min de jogo)
         self.loja_itens_timer += delta
         if self.loja_itens_timer >= 300.0:
@@ -405,6 +418,50 @@ class GameManager:
         total_forca = sum(g.forca_efetiva() for g in self.guardas if g.ativo)
         bonus       = min(0.35, total_forca / 300.0)
         return min(0.97, base + bonus)
+
+    def _verificar_expiracao_itens(self):
+        """Remove itens do inventário comum que passaram de 120s."""
+        remanescentes = []
+        removidos = 0
+        now = self.tempo_jogo
+        
+        for it in self.inventario_itens:
+            # Sanitização on-the-fly para evitar crash se vier string
+            if isinstance(it, str):
+                it = {"id": it, "added_at": now}
+                
+            if now - it.get("added_at", 0) <= 120.0:
+                remanescentes.append(it)
+            else:
+                removidos += 1
+        
+        if removidos > 0:
+            self.inventario_itens = remanescentes
+            self.log_add(f"[SISTEMA] {removidos} item(ns) expiraram e foram descartados.", GRAY)
+
+    def _sanitizar_inventario(self):
+        """Garante que todos os itens nos inventários (servos e guardas) sejam dicionários."""
+        now = self.tempo_jogo
+        
+        # 1. Inventário de servos
+        new_inv = []
+        for it in self.inventario_itens:
+            if isinstance(it, str):
+                new_inv.append({"id": it, "added_at": now})
+            elif isinstance(it, dict) and "id" in it:
+                if "added_at" not in it: it["added_at"] = now
+                new_inv.append(it)
+        self.inventario_itens = new_inv
+
+        # 2. Inventário de guardas
+        new_guard_inv = []
+        for it in self.inventario_guard_itens:
+            if isinstance(it, str):
+                new_guard_inv.append({"id": it, "added_at": now})
+            elif isinstance(it, dict) and "id" in it:
+                if "added_at" not in it: it["added_at"] = now
+                new_guard_inv.append(it)
+        self.inventario_guard_itens = new_guard_inv
 
     def _update_deliveries(self, delta_real: float):
         """Atualiza entregas em trânsito. Chamado com delta de tempo real."""
@@ -492,8 +549,14 @@ class GameManager:
         for item_id, chance in ITEM_DROP_CHANCES.items():
             sorte_bonus = escravo.sorte_efetiva() / 1000
             if random.random() < chance + sorte_bonus:
-                self.inventario_itens.append(item_id)
-                self.log_add(f"[ITEM] {escravo.nome} encontrou: {ITEMS[item_id]['nome']}!", PURPLE)
+                self.inventario_itens.append({"id": item_id, "added_at": self.tempo_jogo})
+                idata = ITEMS[item_id]
+                raridade = idata.get("raridade", "comum")
+                # Só gera notificação relevante (Toast/Histórico) se for Raro ou superior
+                urg = 2 if raridade in ["raro", "epico", "lendario"] else 1
+                tp = "rare_item" if urg == 2 else "item"
+                
+                self.log_add(f"[ITEM] {escravo.nome} encontrou: {idata['nome']}!", PURPLE, tipo=tp, urgencia=urg)
                 break  # apenas um item por ciclo
 
     def acelerar_mineracao(self):
@@ -561,7 +624,7 @@ class GameManager:
             if random.random() < chance:
                 escravo.doente       = True
                 escravo.doenca_timer = self.rules["disease_duration"]
-                self.log_add(f"[DOENÇA] {escravo.nome} ficou doente!", RED)
+                self.log_add(f"[DOENÇA] {escravo.nome} ficou doente!", RED, tipo="disease", urgencia=2)
 
     # ==============================================================
     # SISTEMA DE EQUIPAMENTOS
@@ -569,7 +632,8 @@ class GameManager:
 
     def equipar_item(self, escravo_id: int, item_id: str) -> tuple[bool, str]:
         """Move item do inventário do jogador para o slot do escravo."""
-        if item_id not in self.inventario_itens:
+        item_data = next((it for it in self.inventario_itens if it["id"] == item_id), None)
+        if not item_data:
             return False, "Item não está no inventário."
         if item_id not in ITEMS:
             return False, "Item desconhecido."
@@ -588,12 +652,12 @@ class GameManager:
         if item_atual:
             if escravo.maldicoes.get(slot, 0) > 0:
                 return False, "Slot com maldição ativa! Não pode trocar."
-            # Devolve ao inventário
-            self.inventario_itens.append(item_atual)
+            # Devolve ao inventário resetando o timer
+            self.inventario_itens.append({"id": item_atual, "added_at": self.tempo_jogo})
 
         # Equipa
-        self.inventario_itens.remove(item_id)
         escravo.equipamentos[slot] = item_id
+        self.inventario_itens.remove(item_data)
 
         # Se item maldito, inicia timer de maldição
         item_data = ITEMS[item_id]
@@ -623,7 +687,7 @@ class GameManager:
 
         # Desequipa
         escravo.equipamentos[slot] = None
-        self.inventario_itens.append(item_id)
+        self.inventario_itens.append({"id": item_id, "added_at": self.tempo_jogo})
         nome_item = ITEMS[item_id]["nome"] if item_id in ITEMS else item_id
         self.log_add(f"{escravo.nome} desequipou '{nome_item}'.", GRAY)
         return True, "Item removido!"
@@ -664,17 +728,19 @@ class GameManager:
             if curr_id and curr_id in ITEMS:
                 best_rank = ranks.get(ITEMS[curr_id].get("raridade", "comum"), -1)
                 
-            for iid in list(self.inventario_itens):
+            for it_data in list(self.inventario_itens):
+                iid = it_data["id"]
                 if iid in ITEMS and ITEMS[iid]["slot"] == slot and not ITEMS[iid].get("consumivel"):
                     item_rank = ranks.get(ITEMS[iid].get("raridade", "comum"), 0)
                     if item_rank > best_rank:
                         best_rank = item_rank
                         best_item_id = iid
+                        best_it_data = it_data
                         
             if best_item_id:
                 if curr_id:
-                    self.inventario_itens.append(curr_id)
-                self.inventario_itens.remove(best_item_id)
+                    self.inventario_itens.append({"id": curr_id, "added_at": self.tempo_jogo})
+                self.inventario_itens.remove(best_it_data)
                 escravo.equipamentos[slot] = best_item_id
                 equipou_algo = True
                 
@@ -689,11 +755,6 @@ class GameManager:
         Usa um item consumível do inventário na situação do escravo.
         Efeitos: 'quebrar_maldicao' ou 'curar_tudo'.
         """
-        if item_id not in self.inventario_itens:
-            return False, "Item não encontrado no inventário."
-        if item_id not in ITEMS:
-            return False, "Item desconhecido."
-
         item_data = ITEMS[item_id]
         if not item_data.get("consumivel", False):
             return False, "Este item não é consumível."
@@ -704,8 +765,13 @@ class GameManager:
         if not escravo:
             return False, "Servo não encontrado."
 
+        # Busca no inventário estruturado
+        it_obj = next((it for it in self.inventario_itens if it["id"] == item_id), None)
+        if not it_obj:
+             return False, "Item não encontrado no inventário."
+
         efeito = item_data.get("efeito_consumivel")
-        self.inventario_itens.remove(item_id)
+        self.inventario_itens.remove(it_obj)
 
         escravo.efeito_aura = True
         escravo.aura_timer  = 15.0
@@ -784,9 +850,16 @@ class GameManager:
         for slot in SLOTS:
             item_id = escravo.equipamentos.get(slot)
             if item_id:
-                self.inventario_itens.append(item_id)
+                self.inventario_itens.append({"id": item_id, "added_at": self.tempo_jogo})
                 escravo.equipamentos[slot] = None
-        self.log_add(f"[MORTE] {escravo.nome} faleceu. Causa: {causa}", RED)
+        
+        self.mortalidade_history.append({
+            "t": self.tempo_jogo, 
+            "causa": causa,
+            "nome": escravo.nome,
+            "idade": escravo.idade
+        })
+        self.log_add(f"[MORTE] {escravo.nome} faleceu. Causa: {causa}", RED, tipo="death", urgencia=3)
         self.historico.append((self.tempo_jogo, f"MORTO: {escravo.nome} ({causa})"))
 
     # ==============================================================
@@ -833,7 +906,8 @@ class GameManager:
         mae.breed_cooldown = 100.0
         
         self.log_add(
-            f"[NASCIMENTO] {pai.nome} × {mae.nome} → {filho.nome} ({gen_str})", GREEN
+            f"[NASCIMENTO] Nasceu {filho.nome}! Filho(a) de {mae.nome} e {pai.nome}",
+            GREEN, tipo="birth", urgencia=2
         )
         self.historico.append((self.tempo_jogo, f"NASCIMENTO: {filho.nome} de {pai.nome} e {mae.nome}"))
         return True
@@ -908,7 +982,7 @@ class GameManager:
         for slot in SLOTS:
             item_id = escravo.equipamentos.get(slot)
             if item_id:
-                self.inventario_itens.append(item_id)
+                self.inventario_itens.append({"id": item_id, "added_at": self.tempo_jogo})
                 escravo.equipamentos[slot] = None
         self.ouro += preco
         self.stats["ouro_total"] += preco
@@ -1096,7 +1170,7 @@ class GameManager:
             
         self.ouro -= preco
         self.loja_itens.pop(idx_found)
-        self.inventario_itens.append(item_id)
+        self.inventario_itens.append({"id": item_id, "added_at": self.tempo_jogo})
         self.log_add(f"Comprado {ITEMS[item_id]['nome']} por {preco}g!", GOLD)
         
         return True, "Comprado com sucesso!"
@@ -1147,7 +1221,7 @@ class GameManager:
             self._on_morte(e, "Rebelião")
         perda = min(self.ouro * 0.2, 200)
         self.ouro -= perda
-        self.log_add(f"[REBELIÃO] {len(mortos)} servo(s) mortos. -{perda:.0f}g.", RED)
+        self.log_add(f"[REBELIÃO] {len(mortos)} servo(s) mortos. -{perda:.0f}g.", RED, tipo="event", urgencia=3)
         self.notificacao = {"titulo": "Rebelião!", "msg": f"{len(mortos)} servo(s) se revoltaram!", "cor": RED}
 
     def _ev_caverna(self):
@@ -1156,7 +1230,7 @@ class GameManager:
             self.inventario[r] += q
             self.stats["rec_qtd"][r] += q
             self.stats["recursos_enc"].add(r)
-        self.log_add("[CAVERNA] Uma caverna secreta foi encontrada! Recursos incríveis!", GOLD)
+        self.log_add("[CAVERNA] Uma caverna secreta foi encontrada! Recursos incríveis!", GOLD, tipo="event", urgencia=2)
         self.notificacao = {"titulo": "Caverna Secreta!", "msg": "Ouro, Esmeralda e Diamante encontrados!", "cor": GOLD}
 
     def _ev_fuga(self):
@@ -1165,7 +1239,7 @@ class GameManager:
             return
         fugitivo = min(vivos, key=lambda e: e.lealdade)
         self._on_morte(fugitivo, "Fuga")
-        self.log_add(f"[FUGA] {fugitivo.nome} escapou!", ORANGE)
+        self.log_add(f"[FUGA] {fugitivo.nome} escapou!", ORANGE, tipo="event", urgencia=2)
         self.notificacao = {"titulo": "Servo Fugiu!", "msg": f"{fugitivo.nome} aproveitou um descuido e fugiu.", "cor": ORANGE}
 
     def _ev_doacao(self):
@@ -1189,7 +1263,7 @@ class GameManager:
             # Também drena stamina
             dano_stam = random.randint(20, 50)
             e.stamina = max(1.0, e.stamina - dano_stam)
-        self.log_add("[EPIDEMIA] Uma doença varreu a mina! Todos adoeceram.", PURPLE)
+        self.log_add("[EPIDEMIA] Uma doença varreu a mina! Todos adoeceram.", PURPLE, tipo="event", urgencia=3)
         self.notificacao = {"titulo": "Epidemia!", "msg": "Todos os servos ficaram doentes.", "cor": PURPLE}
 
     def _ev_mineral(self):
@@ -1197,7 +1271,7 @@ class GameManager:
         self.inventario["Adamantita"] += q
         self.stats["rec_qtd"]["Adamantita"] += q
         self.stats["recursos_enc"].add("Adamantita")
-        self.log_add(f"[LENDÁRIO] Veia de Adamantita! +{q}!", PURPLE)
+        self.log_add(f"[LENDÁRIO] Veia de Adamantita! +{q}!", PURPLE, tipo="rare_item", urgencia=2)
         self.notificacao = {"titulo": "Veia Lendária!", "msg": f"+{q} Adamantita encontrada!", "cor": PURPLE}
 
     def _ev_acidente(self):
@@ -1208,7 +1282,7 @@ class GameManager:
         mortos = random.sample(vivos, min(n, len(vivos)))
         for e in mortos:
             self._on_morte(e, "Acidente na mina")
-        self.log_add(f"[ACIDENTE] Desabamento! {len(mortos)} morto(s).", RED)
+        self.log_add(f"[ACIDENTE] Desabamento! {len(mortos)} morto(s).", RED, tipo="event", urgencia=3)
         self.notificacao = {"titulo": "Acidente!", "msg": f"Desabamento matou {len(mortos)} servo(s).", "cor": RED}
 
     def _ev_mercado(self):
@@ -1319,30 +1393,38 @@ class GameManager:
                 rec["gerente_id"]   = g.id
                 rec["gerente_nome"] = g.nome
 
-                if g.autonomia == "automatico":
-                    # Executa silenciosamente
-                    executado = self._executar_acao_rec(rec)
-                    if executado:
-                        g.acoes_realizadas += 1
-                        if rec["urgencia"] >= 2:
-                            self.log_add(
-                                f"[GERENTE] {g.nome}: {rec['msg']}", rec.get("cor", GOLD)
-                            )
-
-                elif g.autonomia == "semi":
-                    # Executa urgência 3 automaticamente; as demais vai para fila
-                    if rec["urgencia"] >= 3:
+                if g.autonomia in ("automatico", "semi", "recomendacao"):
+                    # Se for menos relevante (Urgência 1 ou 2), o gerente executa sozinho
+                    # em qualquer modo que permita recomendações, pois são "atividades triviais"
+                    if rec["urgencia"] < 3:
                         executado = self._executar_acao_rec(rec)
                         if executado:
                             g.acoes_realizadas += 1
                             self.log_add(
-                                f"[GERENTE] {g.nome} (auto): {rec['msg']}", rec.get("cor", GOLD)
+                                f"[GERENTE] {g.nome} (auto): {rec['msg']}", 
+                                rec.get("cor", GOLD), tipo="manager", urgencia=1
                             )
-                    else:
-                        self._enfileirar_rec(rec)
+                        continue
+
+                # Se chegamos aqui, é Urgência 3 (ou modo não tratou auto)
+                if g.autonomia == "automatico":
+                    executado = self._executar_acao_rec(rec)
+                    if executado:
+                        g.acoes_realizadas += 1
+                        self.log_add(f"[GERENTE] {g.nome}: {rec['msg']}", rec.get("cor", GOLD), tipo="manager", urgencia=2)
+
+                elif g.autonomia == "semi":
+                    # Urgência 3+ em modo semi é auto? Sim, o usuário quer que as menores sejam auto,
+                    # e em semi o que é urgente (3) era auto antes. Mantemos consistência.
+                    executado = self._executar_acao_rec(rec)
+                    if executado:
+                        g.acoes_realizadas += 1
+                        self.log_add(f"[GERENTE] {g.nome}: {rec['msg']}", rec.get("cor", GOLD), tipo="manager", urgencia=3)
 
                 else:  # recomendacao
                     self._enfileirar_rec(rec)
+                    if rec["urgencia"] >= 3:
+                        self.rec_importante_pendente = rec
 
     def _enfileirar_rec(self, rec: dict):
         """Adiciona recomendação à fila, evitando duplicatas do mesmo tipo."""
@@ -1511,7 +1593,7 @@ class GameManager:
         if found["tipo"] == "guard":
             self.inventario_guard_itens.append(item_id)
         else:
-            self.inventario_itens.append(item_id)
+            self.inventario_itens.append({"id": item_id, "added_at": self.tempo_jogo})
         nome = found.get("nome", item_id)
         self.log_add(f"[VENDEDOR] Comprou '{nome}' por {preco}g!", GOLD)
         return True, "Comprado!"
@@ -1547,18 +1629,23 @@ class GameManager:
         return True, "Guarda dispensado."
 
     def equipar_item_guarda(self, guarda_id: int, item_id: str) -> tuple[bool, str]:
-        if item_id not in self.inventario_guard_itens:
+        # Busca o item no inventário de guardas (id string)
+        it_obj = next((it for it in self.inventario_guard_itens if it["id"] == item_id), None)
+        if not it_obj:
             return False, "Item não no inventário de guardas."
+        
         if item_id not in GUARD_ITEMS:
             return False, "Item inválido para guardas."
         g = self.get_guarda(guarda_id)
         if not g:
             return False, "Guarda não encontrado."
+            
         slot     = GUARD_ITEMS[item_id]["slot"]
         atual    = g.equipamentos.get(slot)
         if atual:
-            self.inventario_guard_itens.append(atual)
-        self.inventario_guard_itens.remove(item_id)
+            self.inventario_guard_itens.append({"id": atual, "added_at": self.tempo_jogo})
+        
+        self.inventario_guard_itens.remove(it_obj)
         g.equipamentos[slot] = item_id
         nome = GUARD_ITEMS[item_id]["nome"]
         self.log_add(f"[GUARDA] {g.nome} equipou '{nome}'.", CYAN)
@@ -1620,21 +1707,24 @@ class GameManager:
         ranks = {"comum": 0, "incomum": 1, "raro": 2, "épico": 3, "lendário": 4}
         equipou = False
         for slot in GUARD_SLOTS:
-            best_id, best_rank = None, -1
+            best_obj, best_rank = None, -1
             curr_id = g.equipamentos.get(slot)
             if curr_id and curr_id in GUARD_ITEMS:
                 best_rank = ranks.get(GUARD_ITEMS[curr_id].get("raridade", "comum"), -1)
-            for iid in list(self.inventario_guard_itens):
+            
+            for it_obj in list(self.inventario_guard_itens):
+                iid = it_obj["id"] if isinstance(it_obj, dict) else it_obj
                 if iid in GUARD_ITEMS and GUARD_ITEMS[iid]["slot"] == slot:
                     r = ranks.get(GUARD_ITEMS[iid].get("raridade", "comum"), 0)
                     if r > best_rank:
                         best_rank = r
-                        best_id   = iid
-            if best_id:
+                        best_obj  = it_obj
+            
+            if best_obj:
                 if curr_id:
-                    self.inventario_guard_itens.append(curr_id)
-                self.inventario_guard_itens.remove(best_id)
-                g.equipamentos[slot] = best_id
+                    self.inventario_guard_itens.append({"id": curr_id, "added_at": self.tempo_jogo})
+                self.inventario_guard_itens.remove(best_obj)
+                g.equipamentos[slot] = best_obj["id"] if isinstance(best_obj, dict) else best_obj
                 equipou = True
         if equipou:
             self.log_add(f"[GUARDA] {g.nome} equipado automaticamente!", GREEN)
@@ -1649,6 +1739,9 @@ class GameManager:
     def guardas_recuperacao_bonus(self) -> float:
         total_forca = sum(g.forca_efetiva() for g in self.guardas if g.ativo)
         return min(0.35, total_forca / 300.0)
+
+    def guardas_poder_total(self) -> int:
+        return sum(g.poder_total() for g in self.guardas if g.ativo)
 
     # ==============================================================
     # PRESTÍGIO
@@ -1774,10 +1867,30 @@ class GameManager:
     def reset_ui_config(self):
         self.ui_config = self._default_ui_config()
 
-    def log_add(self, msg: str, cor=WHITE):
+    def log_add(self, msg: str, cor=WHITE, tipo="info", urgencia=1):
+        # 1. Sistema de log antigo (legado para compatibilidade visual imediata)
         self.log.insert(0, {"msg": msg, "cor": cor})
         if len(self.log) > 120:
             self.log = self.log[:120]
+
+        # 2. Novo sistema de notificações estruturadas
+        self._notif_id_counter += 1
+        notif = {
+            "id": self._notif_id_counter,
+            "tipo": tipo,
+            "msg": msg,
+            "cor": cor,
+            "tempo": self.tempo_jogo,
+            "urgencia": urgencia,
+            "lida": False
+        }
+
+        # FILTRO DE RELEVÂNCIA: Só entra no histórico/toasts se for importante
+        relevante = (urgencia >= 2) or (tipo in ["death", "birth", "manager", "rare_item", "prestige", "event"])
+        if relevante:
+            self.notificacoes_history.insert(0, notif)
+            if len(self.notificacoes_history) > 100:
+                self.notificacoes_history = self.notificacoes_history[:100]
 
     def close(self):
         self.storage.close()
@@ -1791,6 +1904,9 @@ class GameManager:
         return {
             "version": "2.0",
             "ouro": self.ouro,
+            "tempo_jogo": self.tempo_jogo,
+            "notificacoes_history": self.notificacoes_history,
+            "notif_id_counter": self._notif_id_counter,
             "inventario": self.inventario,
             "inventario_itens": self.inventario_itens,
             "nivel_mina": self.nivel_mina,
@@ -1832,12 +1948,22 @@ class GameManager:
             "gerentes": [g.to_dict() for g in self.gerentes],
             "fila_recomendacoes": self.fila_recomendacoes,
             "t_gerentes": {str(k): v for k, v in self._t_gerentes.items()},
+            "mortalidade_history": self.mortalidade_history,
+            "inventario_itens": self.inventario_itens,
+            "notificacoes_history": self.notificacoes_history,
+            "notif_id_counter": self._notif_id_counter,
+            "loja_itens_timer": self.loja_itens_timer,
+            "loja_guard_itens_timer": self.loja_guard_itens_timer,
         }
 
     def _apply_loaded_state(self, d):
-        self.ouro            = d.get("ouro", 100.0)
-        self.inventario      = d.get("inventario", {r: 0 for r in RESOURCE_ORDER})
+        self.ouro             = d.get("ouro", 100.0)
+        self.tempo_jogo       = d.get("tempo_jogo", 0.0)
+        self.notificacoes_history = d.get("notificacoes_history", [])
+        self._notif_id_counter = d.get("notif_id_counter", 0)
+        self.inventario       = d.get("inventario", {r: 0 for r in RESOURCE_ORDER})
         self.inventario_itens = d.get("inventario_itens", [])
+        self.mortalidade_history = d.get("mortalidade_history", [])
         self.nivel_mina      = d.get("nivel_mina", 0)
         self.upgrades        = d.get("upgrades", {k: 0 for k in UPGRADE_ORDER})
         self.prestigios      = d.get("prestigios", 0)
@@ -1920,6 +2046,9 @@ class GameManager:
         for g in self.gerentes:
             if g.id not in self._t_gerentes:
                 self._t_gerentes[g.id] = g.check_interval
+        
+        # Garante consistência de dados após carregar TUDO (especialmente itens de guarda)
+        self._sanitizar_inventario()
 
     def save(self):
         try:

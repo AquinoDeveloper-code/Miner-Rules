@@ -457,25 +457,25 @@ MANAGER_TIERS = [
     {
         "tipo": "junior",     "nome": "Gerente Júnior",    "preco": 15_000,
         "raridade": "incomum","eficiencia": 0.50,
-        "check_interval": 90.0,   # segundos de jogo entre decisões
+        "check_interval": 20.0,
         "desc": "Identifica problemas básicos. Ações simples de compra/venda.",
     },
     {
         "tipo": "experiente", "nome": "Gerente Experiente","preco": 60_000,
         "raridade": "raro",   "eficiencia": 0.75,
-        "check_interval": 60.0,
+        "check_interval": 20.0,
         "desc": "Gerencia equipamentos, doenças e otimiza stamina.",
     },
     {
         "tipo": "mestre",     "nome": "Gerente Mestre",    "preco": 250_000,
         "raridade": "épico",  "eficiencia": 0.90,
-        "check_interval": 30.0,
+        "check_interval": 20.0,
         "desc": "Gestão completa: breeding, guardas, maldições e riscos.",
     },
     {
         "tipo": "lendario",   "nome": "Gerente Lendário",  "preco": 1_000_000,
         "raridade": "lendário","eficiencia": 1.00,
-        "check_interval": 15.0,
+        "check_interval": 20.0,
         "desc": "IA perfeita: mercado negro, risco, otimização total.",
     },
 ]

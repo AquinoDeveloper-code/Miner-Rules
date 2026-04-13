@@ -84,6 +84,11 @@ class TempHomeTestCase(TestCase):
         )
         random.seed(12345)
         Escravo._id_counter = 0
+        from src.contexts.gameplay.domain.guard import Guarda, Delivery
+        from src.contexts.gameplay.domain.manager import Gerente
+        Guarda._id_counter = 0
+        Delivery._id_counter = 0
+        Gerente._id_counter = 0
 
     def tearDown(self):
         self._stack.close()

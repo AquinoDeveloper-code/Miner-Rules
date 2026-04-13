@@ -144,8 +144,8 @@ class Gerente:
         # ── ESCRAVOS DOENTES ─────────────────────────────────────────
         if ef >= 0.50:
             from src.contexts.shared.constants import ITEMS
-            pocoes = [iid for iid in inv_itens
-                      if iid in ITEMS and ITEMS[iid].get("efeito_consumivel") == "curar_tudo"]
+            pocoes = [it["id"] for it in inv_itens
+                      if it["id"] in ITEMS and ITEMS[it["id"]].get("efeito_consumivel") == "curar_tudo"]
             doentes = [e for e in escravos if e.doente]
             for e in doentes[:len(pocoes)]:
                 recs.append({
@@ -160,8 +160,8 @@ class Gerente:
         # ── MALDIÇÕES ATIVAS COM REZA DISPONÍVEL ─────────────────────
         if ef >= 0.60:
             from src.contexts.shared.constants import ITEMS
-            rezas = [iid for iid in inv_itens
-                     if iid in ITEMS and ITEMS[iid].get("efeito_consumivel") == "quebrar_maldicao"]
+            rezas = [it["id"] for it in inv_itens
+                     if it["id"] in ITEMS and ITEMS[it["id"]].get("efeito_consumivel") == "quebrar_maldicao"]
             malditos = [e for e in escravos if e.tem_maldicao_ativa()]
             for e in malditos[:len(rezas)]:
                 recs.append({
@@ -202,8 +202,8 @@ class Gerente:
         if ef >= 0.60 and self.cfg_equip_auto and inv_itens:
             from src.contexts.shared.constants import ITEMS, SLOTS
             tem_itens_livres = any(
-                iid in ITEMS and not ITEMS[iid].get("consumivel")
-                for iid in inv_itens
+                it["id"] in ITEMS and not ITEMS[it["id"]].get("consumivel")
+                for it in inv_itens
             )
             if tem_itens_livres:
                 recs.append({

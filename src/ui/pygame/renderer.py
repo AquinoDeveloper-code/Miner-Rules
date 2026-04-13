@@ -101,6 +101,8 @@ class Renderer:
         self.shop_scroll  = 0
         self.shop_scroll_max = 0
         self.log_scroll   = 0
+        self.guards_scroll = 0
+        self.guards_scroll_max = 0
         self.tooltip_slave = None
         self.selected_id  = None
         self.show_tutorial = True
@@ -120,8 +122,10 @@ class Renderer:
         self.guarda_slot_sel    = None   # slot selecionado no modal de guarda
         self.guardas_scroll     = 0
 
-        # Vendedor
-        self.show_vendedor = False        # modal do vendedor aberto
+        self.show_tutorial      = game.primeiro_jogo
+        self.show_vendedor      = False
+        self.show_notifications = False
+        self.confirm_reset      = False
 
         # Gerentes
         self.gerente_modal_id  = None    # ID do gerente com modal de config aberto
@@ -170,6 +174,7 @@ class Renderer:
         self.f_title  = pygame.font.SysFont("monospace", max(15, int(15 * ui_scale)), bold=True)
         self.f_normal = pygame.font.SysFont("monospace", max(13, int(13 * ui_scale)))
         self.f_small  = pygame.font.SysFont("monospace", max(11, int(11 * ui_scale)))
+        self.f_tiny   = pygame.font.SysFont("monospace", max(9, int(9 * ui_scale)))
 
         OX = self.OX
         self.r_sidebar = pygame.Rect(0, 0, LOG_SIDEBAR_W, SCREEN_HEIGHT)
@@ -218,10 +223,12 @@ class Renderer:
         bw_pause = 72; bx_pause = base - bw_pause; base = bx_pause - 8
         bw_save = 72; bx_save = base - bw_save; base = bx_save - 8
         bw_ace = 88; bx_ace = base - bw_ace; base = bx_ace - 8
+        bw_bell = 44; bx_bell = base - bw_bell; base = bx_bell - 8
         bw_res = 72; bx_res = base - bw_res
         
         self.btn_reset  = Btn(bx_res, 5, bw_res, 30, "Reset",    cor=(110, 28, 28))
         self.btn_aceler = Btn(bx_ace, 5, bw_ace, 30, "Acelerar", cor=(80, 40, 90))
+        self.btn_bell   = Btn(bx_bell, 5, bw_bell, 30, "🔔", cor=(50, 50, 80))
         self.btn_save   = Btn(bx_save, 5, bw_save, 30, "Salvar",   cor=(30, 55, 100))
         self.btn_pause  = Btn(bx_pause, 5, bw_pause, 30, "Pause",    cor=(70, 45, 15))
         self.btn_1x     = Btn(bx_1x, 5, bw_1x, 30, "1x",       cor=(30, 70, 30))
@@ -231,6 +238,7 @@ class Renderer:
         self._top_btns  = [
             self.btn_reset,
             self.btn_aceler,
+            self.btn_bell,
             self.btn_save,
             self.btn_pause,
             self.btn_1x,
@@ -301,12 +309,27 @@ class Renderer:
 
         self.screen.fill(DARK_BG)
 
+        # Detecta novas mensagens e reseta scroll
+        curr_log_len = len(self.game.log)
+        if not hasattr(self, "_last_log_len"): self._last_log_len = 0
+        if curr_log_len > self._last_log_len:
+            self.log_scroll = 0
+            self._last_log_len = curr_log_len
+
         self._draw_log_sidebar()
         self._draw_topbar(mp)
         self._draw_left(mp)
         self._draw_center(mp)
         self._draw_right(mp)
         self._draw_bottom(mp)
+        
+        # Pop-ups Proativos
+        if self.game.rec_importante_pendente:
+            self._draw_manager_popup(mp)
+        elif self.game.notificacao:
+             # Nota: _draw_vendedor_modal era usado aqui erroneamente. 
+             # O _draw_notif() ja e chamado no bloco de Overlays abaixo.
+             pass
 
         # Divisórias
         def vline(x, y1, y2): pygame.draw.line(self.screen, PANEL_BDR, (x, y1), (x, y2), 1)
@@ -322,6 +345,9 @@ class Renderer:
             self._draw_tooltip(mp)
         if self.game.notificacao:
             self._draw_notif()
+        
+        self._draw_toasts()
+
         if self.show_tutorial:
             self._draw_tutorial()
 
@@ -345,7 +371,8 @@ class Renderer:
 
     def _draw_log_sidebar(self):
         OX  = self.OX
-        log = list(reversed(self.game.log))
+        # Log: Newest at top
+        log = self.game.log
 
         pygame.draw.rect(self.screen, (8, 5, 2), self.r_sidebar)
 
@@ -437,6 +464,14 @@ class Renderer:
             inv_x = ouro_x - inv_surf.get_width() - 8
             self.screen.blit(inv_surf, (inv_x, 14))
 
+        # --- Badge de Notificações ---
+        n_count = sum(1 for n in self.game.notificacoes_history if not n["lida"])
+        if n_count > 0:
+            bx, by = self.btn_bell.rect.x + 30, self.btn_bell.rect.y + 5
+            pygame.draw.circle(self.screen, RED, (bx, by), 8)
+            num_txt = self.f_small.render(str(min(9, n_count)), True, WHITE)
+            self.screen.blit(num_txt, (bx - num_txt.get_width()//2, by - num_txt.get_height()//2))
+
         if self.game.mercado_negro:
             self.screen.blit(
                 self.f_small.render(f"MERCADO NEGRO {self.game.mercado_negro_timer:.0f}s", True, CYAN),
@@ -492,7 +527,28 @@ class Renderer:
             e.anim_y = cy
             self._draw_miner_pixel(cx, cy, e, t_real)
 
+        # ---- NOVO: Desenha o Gerente se houver ----
+        if game.gerentes:
+            g = game.gerentes[0] # Exibe o primeiro gerente
+            # O gerente caminha horizontalmente no topo
+            g_path_w = LEFT_W - 60
+            g_x = OX + 30 + (math.sin(t_real * 0.5) * 0.5 + 0.5) * g_path_w
+            self._draw_manager_unit(g_x, TOP_H + 25, g, t_real)
+
         self.screen.set_clip(None)
+
+        # ---- NOVO: Desenha Guardas patrulhando a estrada ----
+        if game.guardas:
+            ROAD_Y = TOP_H + MINE_GRID_H
+            ROAD_H = MAIN_H - MINE_GRID_H
+            self.screen.set_clip(pygame.Rect(OX, ROAD_Y, LEFT_W, ROAD_H))
+            for i, g in enumerate(game.guardas):
+                if not g.ativo: continue
+                # Posiciona guardas em locais fixos de vigia ou patrulha curta
+                gx = OX + 40 + i * 45
+                gy = ROAD_Y + 15
+                self._draw_guard_unit(gx, gy, g, t_real)
+            self.screen.set_clip(None)
 
         # ----------------------------------------------------------
         # ZONA DE ENTREGA (Road & Environment)
@@ -595,8 +651,13 @@ class Renderer:
         pic_item = e._item_em_slot("picareta")
         is_pic_top = pic_item and pic_item["raridade"] in ("épico", "lendário")
 
-        # --- LÓGICA DE MINERAÇÃO v2 (Dinamismo Total) ---
-        swing_cycle = (t_real * 6.0 + e.anim_frame * 0.4) % 1.0
+        # --- VARIÁVEIS DE ESTADO (Cansado / Idoso) ---
+        is_tired = e.stamina < 30
+        is_old   = e.idade >= 55
+        
+        # Velocidade da animação: servos cansados mineram 50% mais devagar visualmente
+        anim_speed = 3.0 if is_tired else 6.0
+        swing_cycle = (t_real * anim_speed + e.anim_frame * 0.4) % 1.0
         # p: [0..1]
         if swing_cycle < 0.5:
             # 1. ANTECIPAÇÃO (Lento para trás)
@@ -627,6 +688,14 @@ class Renderer:
             impact = False
             
         yo += int(lean)
+        if is_tired:
+            yo += 2 # Cabeça mais "caída"
+            
+        # Tremor de idoso
+        if is_old:
+            cx += random.randint(-1, 1)
+            cy += random.randint(-1, 1)
+
         cx += int(vib) # Vibração horizontal no impacto
 
         vp    = e.stamina / 100.0  
@@ -848,9 +917,66 @@ class Renderer:
         
         # Efeito de Impacto (Substituindo texto fixo por ícone e flash)
         if int(t_real * 6) % 2 == 0:
-            pygame.draw.circle(self.screen, WHITE, (ex+5, ey+5), 3)
-            self.screen.blit(self.f_small.render("!", True, RED), (ex+3, ey-15))
+            pygame.draw.circle(self.screen, WHITE, (ex+5, ey+5), 8, 1)
+
+    def _draw_manager_unit(self, x, y, g, t_real):
+        """Desenha o Gerente com prancheta e visual de inspetor."""
+        bob = int(math.sin(t_real * 3.0) * 2)
+        skin = (235, 200, 160)
+        suit = (35, 35, 45) # Terno escuro
         
+        # Sombra
+        pygame.draw.ellipse(self.screen, (15, 10, 5), (x-6, y+16, 12, 5))
+        
+        # Corpo
+        pygame.draw.rect(self.screen, suit, (x-4, y, 8, 12), border_radius=2)
+        # Cabeça
+        pygame.draw.rect(self.screen, skin, (x-4, y-8 + bob, 8, 8), border_radius=3)
+        # Chapéu / Cartola
+        pygame.draw.rect(self.screen, (10, 10, 10), (x-5, y-8 + bob, 10, 2))
+        pygame.draw.rect(self.screen, (10, 10, 10), (x-3, y-13 + bob, 6, 6))
+        
+        # Prancheta (Clipboard)
+        pygame.draw.rect(self.screen, (180, 160, 130), (x+4, y + bob, 6, 8))
+        pygame.draw.rect(self.screen, (240, 240, 240), (x+5, y+1 + bob, 4, 6))
+        
+        # Nome flutuante
+        txt = self.f_small.render(g.nome.split("#")[0], True, CYAN)
+        self.screen.blit(txt, (x - txt.get_width()//2, y - 25 + bob))
+
+    def _draw_guard_unit(self, x, y, g, t_real):
+        """Desenha o Guarda com variações baseadas em Força e Agilidade."""
+        # Se agilidade alta, ele fica mais "inquieto" (bob mais rápido)
+        agitacao = 1.0 + (g.agilidade_efetiva() / 100.0)
+        bob = int(math.sin(t_real * 2.0 * agitacao) * 2)
+        
+        # Cor da armadura baseada em força
+        # Força alta = armadura mais brilhante/metálica
+        f_factor = min(1.0, g.forca_efetiva() / 100.0)
+        armor_c = (100 + 100*f_factor, 105 + 100*f_factor, 120 + 100*f_factor)
+        
+        # Sombra
+        pygame.draw.ellipse(self.screen, (15, 10, 5), (x-7, y+18, 14, 6))
+        
+        # 1. Pernas
+        pygame.draw.rect(self.screen, (30, 30, 40), (x-4, y+12, 3, 7))
+        pygame.draw.rect(self.screen, (30, 30, 40), (x+1, y+12, 3, 7))
+        
+        # 2. Corpo (Armadura)
+        # Se força for muito alta, ele fica mais "largo"
+        width = 10 if g.forca_efetiva() < 80 else 12
+        pygame.draw.rect(self.screen, armor_c, (x - width//2, y, width, 14), border_radius=2)
+        
+        # 3. Cabeça (Elmo)
+        pygame.draw.rect(self.screen, armor_c, (x-4, y-9 + bob, 8, 9), border_radius=3)
+        # Fresta do elmo
+        pygame.draw.rect(self.screen, (10, 10, 10), (x-3, y-6 + bob, 6, 2))
+        
+        # 4. Lança/Arma
+        weapon_c = (150, 150, 160)
+        pygame.draw.line(self.screen, (80, 50, 20), (x+5, y+15), (x+5, y-15 + bob), 2)
+        pygame.draw.polygon(self.screen, weapon_c, [(x+3, y-15+bob), (x+7, y-15+bob), (x+5, y-22+bob)])
+
     def _draw_road_environment(self, ox, ry, rw, rh, t_real):
         """Desenha grama, árvores e detalhes do terreno na estrada."""
         # Chão de terra batida
@@ -1205,8 +1331,19 @@ class Renderer:
             self.screen.blit(self.f_small.render(f"Guardas: {ativos}/{len(game.guardas)}", True, CYAN), (rx+6, y)); y += 12
             self.screen.blit(self.f_small.render(f"-Atq: {agi_red*100:.0f}%  +Rec: {rec_bon*100:.0f}%", True, GREEN), (rx+6, y)); y += 14
 
-        pygame.draw.line(self.screen, PANEL_BDR, (rx+4, y), (rx+RIGHT_W-4, y), 1); y += 5
-        self.screen.blit(self.f_title.render("ESTATÍSTICAS", True, LIGHT_BROWN), (rx+6, y)); y += 16
+        self.screen.blit(self.f_title.render("ESTATÍSTICAS", True, LIGHT_BROWN), (rx+6, y))
+        
+        # Botão para alternar modo de visão de estatísticas (Normal / Gráfico)
+        btn_graf = Btn(rx + RIGHT_W - 85, y, 75, 18, 
+                       "GRÁFICO" if getattr(self, "stat_view", 0) == 0 else "RESUMO",
+                       cor=(60, 40, 20))
+        btn_graf.update(mp); btn_graf.draw(self.screen, self.f_tiny)
+        self.dyn_btns.append((btn_graf, ("toggle_stat_view", None)))
+        y += 18
+        
+        if getattr(self, "stat_view", 0) == 1:
+            self._draw_mortality_chart(rx + 6, y)
+            return
 
         def stat(txt, cor=GRAY):
             self.screen.blit(self.f_small.render(txt, True, cor), (rx+6, y))
@@ -1708,8 +1845,20 @@ class Renderer:
         
         # Em vez de fazer scroll nesta aba para não complexificar demais (dado o BOTTOM_H),
         # renderizamos o máximo que couber, ou os itens selecionáveis
-        for i, iid in enumerate(inv):
+        for i, it_obj in enumerate(inv):
+            # Segurança contra strings se por algum motivo escaparem à sanitização
+            if isinstance(it_obj, str):
+                iid = it_obj
+                added_at = self.game.tempo_jogo
+            else:
+                iid = it_obj.get("id", "item_erro")
+                added_at = it_obj.get("added_at", self.game.tempo_jogo)
+            
             if iid not in ITEMS: continue
+            
+            # Cálculo de tempo restante (120s - tempo decorrido)
+            tempo_decorrido = self.game.tempo_jogo - added_at
+            tempo_restante = max(0, 120.0 - tempo_decorrido)
             
             c_col = i % cols
             c_row = i // cols
@@ -1721,7 +1870,7 @@ class Renderer:
                 
             item_data = ITEMS[iid]
             cor_item = RARITY_COLORS.get(item_data["raridade"], GRAY)
-            is_sel = (i, iid) in self.inv_selecionados
+            is_sel = id(it_obj) in self.inv_selecionados
             
             bg_col = (40, 50, 80) if is_sel else (20, 15, 10)
             rect = pygame.Rect(ix, iy, cw - 4, h_item - 2)
@@ -1729,22 +1878,64 @@ class Renderer:
             pygame.draw.rect(self.screen, bg_col, rect, border_radius=3)
             pygame.draw.rect(self.screen, cor_item, rect, 1, border_radius=3)
             
-            nome_str = item_data["nome"][:18]
-            self.screen.blit(self.f_small.render(nome_str, True, WHITE), (ix + 4, iy + 2))
+            # Nome e Tempo
+            nome_str = item_data["nome"][:14]
+            timer_str = f"{tempo_restante:.0f}s"
+            timer_cor = RED if tempo_restante < 30 else YELLOW
             
-            # Hover no inventário geral para mostrar atributo
+            self.screen.blit(self.f_small.render(nome_str, True, WHITE), (ix + 4, iy + 2))
+            self.screen.blit(self.f_tiny.render(timer_str, True, timer_cor), (ix + cw - 40, iy + 4))
+            
+            # Hover no inventário geral
             if rect.collidepoint(mp):
                 pygame.draw.rect(self.screen, CYAN, rect, 1, border_radius=3)
                 
-            self.dyn_btns.append((_RectBtn(rect), ("inv_toggle_sel", (i, iid))))
+            self.dyn_btns.append((_RectBtn(rect), ("inv_toggle_sel", id(it_obj))))
 
         self.screen.set_clip(None)
 
-    # ------------------------------------------------------------------
-        if self.game.log:
-            entry = self.game.log[0]
-            ts = self.f_small.render(entry["msg"][:180], True, entry["cor"])
-            self.screen.blit(ts, (self.OX + 8, self.r_log.y + 14))
+
+    def _draw_manager_popup(self, mp):
+        """Modal proativo de recomendação urgente do gerente."""
+        rec = self.game.rec_importante_pendente
+        if not rec: return
+        
+        # Dimming
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+        
+        mw, mh = 500, 240
+        mx = (SCREEN_WIDTH - mw) // 2
+        my = (SCREEN_HEIGHT - mh) // 2
+        rect = pygame.Rect(mx, my, mw, mh)
+        
+        pygame.draw.rect(self.screen, (35, 30, 45), rect, border_radius=10)
+        pygame.draw.rect(self.screen, CYAN, rect, 2, border_radius=10)
+        
+        # Cabeçalho
+        title = f"CONSELHO DE {rec['gerente_nome']}"
+        self.screen.blit(self.f_normal.render(title, True, CYAN), (mx + 20, my + 20))
+        
+        # Avatar do Gerente (Miniatura)
+        self._draw_manager_unit(mx + 60, my + 80, self.game.get_gerente(rec["gerente_id"]), 0)
+        
+        # Mensagem
+        lines = self._wrap_text(rec["msg"], mw - 140)
+        for i, line in enumerate(lines):
+            self.screen.blit(self.f_small.render(line, True, WHITE), (mx + 110, my + 60 + i*16))
+            
+        # Botões
+        bx, by = mx + 110, my + mh - 60
+        if rec.get("acao_tipo"):
+            b_exec = Btn(bx, by, 160, 32, "Executar Ação", cor=(30, 80, 50))
+            b_exec.update(mp); b_exec.draw(self.screen, self.f_normal)
+            self.dyn_btns.append((b_exec, ("gerente_exec_rec", rec)))
+            bx += 170
+            
+        b_close = Btn(bx, by, 120, 32, "Dispensar", cor=(60, 30, 30))
+        b_close.update(mp); b_close.draw(self.screen, self.f_normal)
+        self.dyn_btns.append((b_close, ("gerente_dimiss_rec", None)))
 
     # ------------------------------------------------------------------
     # MODAL DE DETALHE DO ESCRAVO
@@ -1899,7 +2090,7 @@ class Renderer:
             y += 24
 
         # Consumíveis no inventário
-        consumiveis = [iid for iid in game.inventario_itens if iid in ITEMS and ITEMS[iid].get("consumivel")]
+        consumiveis = [it["id"] for it in game.inventario_itens if it["id"] in ITEMS and ITEMS[it["id"]].get("consumivel")]
         if consumiveis:
             y += 4
             self.screen.blit(self.f_small.render("CONSUMIVEIS:", True, LIGHT_BROWN), (COL1_X, y)); y += 13
@@ -1987,12 +2178,12 @@ class Renderer:
         # Filtra itens por slot selecionado (apenas não consumíveis para equipar)
         inv_itens = game.inventario_itens
         if self.detalhe_slot_sel:
-            filtrado = [iid for iid in inv_itens
-                        if iid in ITEMS and ITEMS[iid]["slot"] == self.detalhe_slot_sel
-                        and not ITEMS[iid].get("consumivel", False)]
+            filtrado = [it["id"] for it in inv_itens
+                        if it["id"] in ITEMS and ITEMS[it["id"]]["slot"] == self.detalhe_slot_sel
+                        and not ITEMS[it["id"]].get("consumivel", False)]
         else:
-            filtrado = [iid for iid in inv_itens
-                        if iid in ITEMS and not ITEMS[iid].get("consumivel", False)]
+            filtrado = [it["id"] for it in inv_itens
+                        if it["id"] in ITEMS and not ITEMS[it["id"]].get("consumivel", False)]
 
         if not filtrado:
             self.screen.blit(self.f_small.render("Nenhum item disponivel.", True, DARK_GRAY), (COL3_X, y3))
@@ -2084,23 +2275,28 @@ class Renderer:
         if not game.guardas:
             self.screen.blit(self.f_small.render("Nenhum guarda contratado.", True, DARK_GRAY), (x, y)); y += 14
         else:
-            gw = split - 12
+            # Lista scrollable de guardas
+            list_rect = pygame.Rect(x, cy, split - 10, BOTTOM_H - 10)
+            self.screen.set_clip(list_rect)
+            
+            gw = split - 20
+            yy = y - getattr(self, "guards_scroll", 0)
             for g in game.guardas:
                 cor_r = g.cor_raridade()
-                gy    = y
+                gy    = yy
                 pygame.draw.rect(self.screen, (18,14,8), (x, gy, gw, 38), border_radius=4)
                 pygame.draw.rect(self.screen, cor_r,     (x, gy, gw, 38), 1, border_radius=4)
 
                 # Info básica
                 gen = "M" if g.genero == "M" else "F"
                 self.screen.blit(self.f_small.render(
-                    f"{gen} {g.nome[:14]}  [{g.raridade}]  Idade:{g.idade:.0f}",
+                    f"{gen} {g.nome[:14]}  [{g.raridade}]",
                     True, cor_r), (x+4, gy+3))
                 self.screen.blit(self.f_small.render(
-                    f"Forca:{g.forca_efetiva()}  Res:{g.resistencia_efetiva()}  Agi:{g.agilidade_efetiva()}",
+                    f"F:{g.forca_efetiva()} R:{g.resistencia_efetiva()} A:{g.agilidade_efetiva()}",
                     True, GRAY), (x+4, gy+14))
 
-                # Equipamentos (pontos coloridos)
+                # Equipamentos
                 eq_x = x + 4
                 for slot in GUARD_SLOTS:
                     iid = g.equipamentos.get(slot)
@@ -2108,18 +2304,19 @@ class Renderer:
                     pygame.draw.circle(self.screen, cor, (eq_x + 5, gy + 28), 4)
                     eq_x += 16
 
-                # Botões
-                bdet = Btn(x+gw-100, gy+3, 46, 14, "Det.", cor=(35,50,70))
+                # Botões (ajustados para scroll)
+                bdet = Btn(x+gw-95, gy+3, 44, 14, "Det.", cor=(35,50,70))
                 bdet.update(mp); bdet.draw(self.screen, self.f_small)
                 self.dyn_btns.append((bdet, ("guarda_detalhe", g.id)))
 
-                bdis = Btn(x+gw-50,  gy+3, 44, 14, "Disp.", cor=(70,25,18))
+                bdis = Btn(x+gw-48,  gy+3, 44, 14, "Disp.", cor=(70,25,18))
                 bdis.update(mp); bdis.draw(self.screen, self.f_small)
                 self.dyn_btns.append((bdis, ("demitir_guarda", g.id)))
 
-                y += 42
-                if y > cy + BOTTOM_H - 30:
-                    break
+                yy += 42
+            
+            self.guards_scroll_max = max(0, (len(game.guardas) * 42) - (BOTTOM_H - 40))
+            self.screen.set_clip(None)
 
         # Bônus coletivo
         if game.guardas:
@@ -2222,8 +2419,9 @@ class Renderer:
         self.screen.blit(self.f_small.render("CONTRIBUIÇÃO", True, LIGHT_BROWN), (COL1_X, y1)); y1 += 14
         self.screen.blit(self.f_small.render(f"Red. Ataques:  -{g.agilidade_efetiva()/400*100:.1f}%", True, GREEN), (COL1_X, y1)); y1 += 13
         self.screen.blit(self.f_small.render(f"Bon. Recuper.: +{g.forca_efetiva()/300*100:.1f}%", True, CYAN), (COL1_X, y1)); y1 += 13
-        self.screen.blit(self.f_small.render(f"Poder total:    {g.poder_total()}", True, GOLD), (COL1_X, y1)); y1 += 20
-
+        poder = sum(g2.poder_total() for g2 in game.guardas)
+        self.screen.blit(self.f_small.render(f"Poder Total: {poder}", True, GRAY), (COL1_X, y1)); y1 += 20
+            
         # Col 2: slots de equipamento
         COL2_X = px + 210
         y2     = py + 34
@@ -2262,7 +2460,9 @@ class Renderer:
         self.screen.blit(self.f_small.render("INVENTÁRIO GUARDAS", True, LIGHT_BROWN), (COL3_X, y3)); y3 += 16
 
         filtrado = []
-        for iid in game.inventario_guard_itens:
+        for it_obj in game.inventario_guard_itens:
+            # Defensivo: suporta tanto o novo sistema (dict) quanto o antigo (str) se houver falha na sanitização
+            iid = it_obj["id"] if isinstance(it_obj, dict) else it_obj
             if iid in GUARD_ITEMS:
                 if not self.guarda_slot_sel or GUARD_ITEMS[iid]["slot"] == self.guarda_slot_sel:
                     filtrado.append(iid)
@@ -2273,7 +2473,7 @@ class Renderer:
             inv_w = W - (COL3_X - px) - 10
             for iid in filtrado[:10]:
                 idata  = GUARD_ITEMS[iid]
-                cor_i  = RARITY_COLORS.get(idata.get("raridade","comum"), GRAY)
+                cor_i  = idata.get("cor_visual", WHITE)
                 pygame.draw.rect(self.screen, (18,12,6), (COL3_X, y3, inv_w, 20), border_radius=3)
                 self.screen.blit(self.f_small.render(f"{idata['nome'][:20]}", True, cor_i), (COL3_X+4, y3+4))
                 beq = Btn(COL3_X + inv_w - 52, y3+2, 48, 16, "Equip.", cor=(35,60,22))
@@ -2293,6 +2493,56 @@ class Renderer:
 
         pygame.draw.line(self.screen, PANEL_BDR, (COL2_X-5, py+28), (COL2_X-5, py+H-10), 1)
         pygame.draw.line(self.screen, PANEL_BDR, (COL3_X-5, py+28), (COL3_X-5, py+H-10), 1)
+
+    def _draw_notifications_panel(self):
+        """Painel lateral que exibe o histórico de notificações estruturado."""
+        W, H = int(RIGHT_W), MAIN_H + TOP_H
+        X = SCREEN_WIDTH - W
+        Y = 0
+        
+        # Overlay de fundo
+        surf = pygame.Surface((W, H), pygame.SRCALPHA)
+        surf.fill((10, 10, 15, 250))
+        self.screen.blit(surf, (X, Y))
+        pygame.draw.line(self.screen, CYAN, (X, Y), (X, Y + H), 2)
+        
+        # Título
+        self.screen.blit(self.f_normal.render("NOTIFICAÇÕES", True, CYAN), (X + 15, Y + 15))
+        
+        # Botão Fechar
+        bfch = Btn(X + W - 40, Y + 10, 30, 30, "X", cor=(60,20,20))
+        bfch.update(self._mouse_pos()); bfch.draw(self.screen, self.f_normal)
+        self.dyn_btns.append((bfch, ("toggle_notifications", None)))
+        
+        # Lista de Notificações
+        notifs = self.game.notificacoes_history
+        ny = Y + 60
+        for n in notifs[:20]: # Exibe as 20 mais recentes
+            cor_urgencia = WHITE if n["urgencia"] < 2 else (GOLD if n["urgencia"] == 2 else RED)
+            if not n["lida"]:
+                # Destaque para não lidas
+                pygame.draw.rect(self.screen, (30, 30, 50), (X + 5, ny - 2, W - 10, 38), border_radius=4)
+            
+            # Ícone baseado no tipo
+            icon_txt = "!"
+            if n["tipo"] == "death": icon_txt = "☠"
+            elif n["tipo"] == "birth": icon_txt = "👶"
+            elif n["tipo"] == "item": icon_txt = "💎"
+            elif n["tipo"] == "manager": icon_txt = "👔"
+            
+            self.screen.blit(self.f_normal.render(icon_txt, True, n["cor"]), (X + 10, ny))
+            
+            # Texto da mensagem (wrap se necessário)
+            msg_lines = self._wrap_text(n["msg"], W - 50)
+            for i, line in enumerate(msg_lines[:2]):
+                self.screen.blit(self.f_small.render(line, True, cor_urgencia), (X + 35, ny + i*13))
+            
+            # Botão invisível para marcar como lida
+            notif_rect = _RectBtn(pygame.Rect(X + 5, ny - 2, W - 10, 38))
+            self.dyn_btns.append((notif_rect, ("read_notif", n["id"])))
+            
+            ny += 45
+            if ny > H - 20: break
 
     # ------------------------------------------------------------------
     # ABA 9: GERÊNCIA
@@ -2594,7 +2844,7 @@ class Renderer:
                 # Bônus
                 bonus_y = iy + 62
                 for attr, val in list(data.get("bonus",{}).items())[:4]:
-                    self.screen.blit(self.f_small.render(f"{attr}:{val:+d}", True, GREEN if val>0 else RED),
+                    self.screen.blit(self.f_small.render(f"{attr}:{int(val):+d}", True, GREEN if val>0 else RED),
                                      (ix+4, bonus_y)); bonus_y += 12
 
                 pode_c = game.ouro >= it["preco"]
@@ -2734,6 +2984,14 @@ class Renderer:
     # ------------------------------------------------------------------
 
     def handle_event(self, ev):
+        # Atalho Global para Captura de Tela
+        if ev.type == pygame.KEYDOWN and ev.key == pygame.K_F12:
+            import os
+            from datetime import datetime
+            path = os.path.join(os.getcwd(), f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+            self.save_screenshot(path)
+            return
+
         ev = self._normalize_event(ev)
         mp   = self._mouse_pos()
         game = self.game
@@ -2760,9 +3018,14 @@ class Renderer:
                 return
 
         if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            if game.rec_importante_pendente:
+                return 
             if game.notificacao:
-                game.notificacao = None
-                return
+                # Só limpa se o clique não atingiu nenhum botão dinâmico anterior (como o do vendedor)
+                # Na verdade, a notificação central deve ser limpa por qualquer clique que NÃO seja em modal.
+                if not (self.show_vendedor or self.slave_detalhe_id or self.guarda_detalhe_id or self.gerente_modal_id):
+                    game.notificacao = None
+                    return
             if self.show_tutorial:
                 self.show_tutorial = False
                 game.primeiro_jogo = False
@@ -2796,6 +3059,9 @@ class Renderer:
         if ev.type == pygame.MOUSEWHEEL and self.r_bottom.collidepoint(mp) and self.tab == 0:
             self.shop_scroll = max(0, min(self.shop_scroll_max, self.shop_scroll - ev.y * 28))
 
+        if ev.type == pygame.MOUSEWHEEL and self.r_bottom.collidepoint(mp) and self.tab == 8:
+            self.guards_scroll = max(0, min(getattr(self, "guards_scroll_max", 0), self.guards_scroll - ev.y * 30))
+
         # Scroll — sidebar de log
         if ev.type == pygame.MOUSEWHEEL and self.r_sidebar.collidepoint(mp):
             total    = len(game.log)
@@ -2807,6 +3073,12 @@ class Renderer:
             self.log_scroll = max(0, min(max_scroll, self.log_scroll + ev.y * 3))
 
         # Botões topbar
+        if self.btn_bell.clicked(ev):
+            self.show_notifications = not self.show_notifications
+            # Resetar scroll ao abrir
+            if self.show_notifications: self.notif_scroll = 0
+            return
+            
         if self.btn_pause.clicked(ev):  game.pausado = not game.pausado
         if self.btn_1x.clicked(ev):     game.velocidade = 1
         if self.btn_2x.clicked(ev):     game.velocidade = 2
@@ -3046,52 +3318,125 @@ class Renderer:
             game.ignorar_recomendacao(param)
             game.log_add("Recomendação ignorada.", GRAY)
 
+        elif acao == "gerente_exec_rec":
+            rec = param
+            # Executa usando o método existente no GameManager
+            executado = game._executar_acao_rec(rec)
+            if executado:
+                game.log_add(f"Ação executada: {rec['msg']}", GREEN)
+                # Remove da fila original
+                game.fila_recomendacoes = [r for r in game.fila_recomendacoes if r != rec]
+            game.rec_importante_pendente = None
+
+        elif acao == "gerente_dimiss_rec":
+            game.rec_importante_pendente = None
+
+        elif acao == "toggle_notifications":
+            self.show_notifications = not self.show_notifications
+            
+        elif acao == "toggle_stat_view":
+            self.stat_view = 1 if getattr(self, "stat_view", 0) == 0 else 0
+            
+        elif acao == "set_mortality_window":
+            self.mortality_window = param
+
+        elif acao == "read_notif":
+            notif_id = param
+            for n in game.notificacoes_history:
+                if n["id"] == notif_id:
+                    n["lida"] = True
+                    break
+
         elif acao == "inv_toggle_sel":
-            inv_idx, iid = param
-            pair = (inv_idx, iid)
-            if pair in self.inv_selecionados:
-                self.inv_selecionados.remove(pair)
+            obj_id = param
+            if obj_id in self.inv_selecionados:
+                self.inv_selecionados.remove(obj_id)
             else:
-                self.inv_selecionados.add(pair)
+                self.inv_selecionados.add(obj_id)
                 
         elif acao == "inv_mass_delete":
-            to_delete = []
+            to_delete_objs = []
             inv = self.game.inventario_itens
             
             if param == "del_comum":
-                for i, iid in enumerate(inv):
+                for it_obj in inv:
+                    iid = it_obj["id"] if isinstance(it_obj, dict) else it_obj
                     if iid in ITEMS and ITEMS[iid]["raridade"] == "comum":
-                        to_delete.append(iid)
+                        to_delete_objs.append(it_obj)
             elif param == "del_incomum":
-                for i, iid in enumerate(inv):
+                for it_obj in inv:
+                    iid = it_obj["id"] if isinstance(it_obj, dict) else it_obj
                     if iid in ITEMS and ITEMS[iid]["raridade"] == "incomum":
-                        to_delete.append(iid)
+                        to_delete_objs.append(it_obj)
             elif param == "del_sel":
-                # Sort by index descending to safely remove if we were popping, but we just remove by element (actually we can just remove all matches or reconstruct the list)
-                to_delete = [p[1] for p in self.inv_selecionados]
+                # Filtra o inventário mantendo apenas os NÃO selecionados
+                to_delete_objs = [it for it in inv if id(it) in self.inv_selecionados]
                 self.inv_selecionados.clear()
             elif param == "del_unsel":
-                sel_ids = [p[1] for p in self.inv_selecionados]
-                for i, iid in enumerate(inv):
-                    if iid not in sel_ids:
-                        to_delete.append(iid)
+                # Filtra o inventário mantendo apenas os selecionados
+                to_delete_objs = [it for it in inv if id(it) not in self.inv_selecionados]
                 self.inv_selecionados.clear()
                 
-            if to_delete:
-                new_inv = []
-                # Remove occurrences. If an ID is in to_delete, we remove it. We'll count frequencies to handle multiple identical items properly.
-                from collections import Counter
-                del_counts = Counter(to_delete)
-                for iid in inv:
-                    if del_counts[iid] > 0:
-                        del_counts[iid] -= 1
-                    else:
-                        new_inv.append(iid)
-                        
+            if to_delete_objs:
+                new_inv = [it for it in inv if it not in to_delete_objs]
                 self.game.inventario_itens = new_inv
-                self.game.log_add(f"{len(to_delete)} itens deletados do inventário.", RED)
-                # clear valid selection cache since indices shifted
+                self.game.log_add(f"{len(to_delete_objs)} itens deletados do inventário.", RED)
                 self.inv_selecionados.clear()
+
+        elif acao == "toggle_stat_view":
+            self.stat_view = 1 if getattr(self, "stat_view", 0) == 0 else 0
+            
+        elif acao == "set_mortality_window":
+            self.mortality_window = param
+
+    def _draw_mortality_chart(self, x, y):
+        """Desenha um gráfico de barras simples com as causas de morte."""
+        now = self.game.tempo_jogo
+        windows = [900, 1800, 3600] # 15m, 30m, 1h
+        w_idx = getattr(self, "mortality_window", 0)
+        max_t = windows[w_idx]
+        
+        # Filtra histórico
+        recente = [h for h in self.game.mortalidade_history if now - h["t"] <= max_t]
+        
+        # Seletor de tempo
+        labels = ["15m", "30m", "1h"]
+        for i, lbl in enumerate(labels):
+            bx = x + i * 45
+            b = Btn(bx, y, 40, 16, lbl, cor=(40, 50, 60) if w_idx == i else (20, 25, 30))
+            b.update(self._mouse_pos()); b.draw(self.screen, self.f_tiny)
+            self.dyn_btns.append((b, ("set_mortality_window", i)))
+        y += 22
+        
+        if notrecente := [h for h in self.game.mortalidade_history if now - h["t"] <= max_t]:
+            # Reutiliza o filtro para garantir consistência
+            pass
+            
+        if not recente:
+            self.screen.blit(self.f_small.render("Sem dados p/ este período.", True, (100, 100, 100)), (x, y))
+            return
+            
+        # Agrupa por causa
+        contagem = {}
+        for h in recente:
+            c = h["causa"]
+            contagem[c] = contagem.get(c, 0) + 1
+            
+        total = len(recente)
+        causas_sorted = sorted(contagem.items(), key=lambda i: i[1], reverse=True)
+        
+        # Desenha barras
+        bar_max_w = RIGHT_W - 40
+        for causa, qtd in causas_sorted[:6]:
+            pct = qtd / total
+            # Barra
+            pygame.draw.rect(self.screen, (30, 20, 10), (x, y, bar_max_w, 14))
+            c_low = causa.lower()
+            bar_cor = (200, 50, 50) if "mald" in c_low or "acid" in c_low else (200, 150, 50)
+            pygame.draw.rect(self.screen, bar_cor, (x, y, int(bar_max_w * pct), 14))
+            txt = f"{causa[:12]}: {qtd} ({pct*100:.0f}%)"
+            self.screen.blit(self.f_tiny.render(txt, True, (255, 255, 255)), (x + 4, y + 1))
+            y += 16
 
     def notify_mining(self, escravo_id: int, cor):
         """Chamado pelo game loop quando um escravo acabou de minerar."""
@@ -3101,10 +3446,64 @@ class Renderer:
         if e and hasattr(e, "anim_x"):
             self.spawn_particles(e.anim_x, e.anim_y, cor)
 
+    def _draw_toasts(self):
+        """Desenha notificações temporárias (toasts) sobre a barra lateral de logs."""
+        now = self.game.tempo_jogo
+        toasts = [n for n in self.game.notificacoes_history if now - n["tempo"] < 5.0]
+        
+        if not toasts:
+            return
+            
+        toast_w = self.OX - 10
+        tx = 5
+        ty = 25
+        
+        for n in toasts[:4]:  # Mostra no máximo as 4 últimas
+            msg_lines = self._wrap_text(n["msg"], toast_w - 30)
+            toast_h = 20 + len(msg_lines) * 14
+            
+            # Fundo mais opaco para legibilidade sobre o log
+            s = pygame.Surface((toast_w, toast_h), pygame.SRCALPHA)
+            s.fill((15, 12, 20, 240))
+            self.screen.blit(s, (tx, ty))
+            pygame.draw.rect(self.screen, n["cor"], (tx, ty, toast_w, toast_h), 1, border_radius=4)
+            
+            # Ícone
+            self.screen.blit(self.f_normal.render("!", True, n["cor"]), (tx + 4, ty + 2))
+            
+            # Mensagens
+            for i, line in enumerate(msg_lines):
+                self.screen.blit(self.f_small.render(line.strip(), True, WHITE), (tx + 22, ty + 5 + i*14))
+            
+            ty += (toast_h + 4)
+
+    def save_screenshot(self, filename: str):
+        """Salva a superfície de renderização atual como uma imagem PNG."""
+        try:
+            pygame.image.save(self.screen, filename)
+            self.game.log_add(f"[SISTEMA] Captura salva: {filename}", (0, 255, 255))
+        except Exception as e:
+            self.game.log_add(f"[ERRO] Falha ao capturar tela: {e}", (255, 0, 0))
+
 
 # ============================================================
 # HELPER INTERNO — botão baseado em Rect simples
 # ============================================================
+
+    def _wrap_text(self, text: str, max_w: int) -> list[str]:
+        """Quebra um texto em várias linhas que cabem em max_w pixels."""
+        words = text.split(' ')
+        lines = []
+        curr_line = ""
+        for word in words:
+            test_line = curr_line + word + " "
+            if self.f_small.size(test_line)[0] < max_w:
+                curr_line = test_line
+            else:
+                lines.append(curr_line.strip())
+                curr_line = word + " "
+        lines.append(curr_line.strip())
+        return [l for l in lines if l]
 
 class _RectBtn:
     """Rect-like mínimo que satisfaz a interface de Btn para dyn_btns."""
