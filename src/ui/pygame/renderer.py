@@ -12,7 +12,7 @@ from src.contexts.shared.constants import (
     BLACK, DARK_BG, PANEL_BG, PANEL_BDR, CAVE_BG,
     DARK_BROWN, MED_BROWN, LIGHT_BROWN,
     WHITE, GRAY, DARK_GRAY,
-    RED, DARK_RED, GREEN, DARK_GREEN, BLUE, YELLOW, ORANGE, PURPLE, CYAN, GOLD, PINK,
+    RED, DARK_RED, GREEN, DARK_GREEN, BLUE, YELLOW, ORANGE, PURPLE, CYAN, GOLD, SILVER, PINK,
     RARITY_COLORS, RESOURCES, RESOURCE_ORDER, MINE_UPGRADES, UPGRADE_ORDER,
     MINE_DEPTHS, ACHIEVEMENTS,
     SLOTS, SLOT_NOMES, ITEMS, RETIREMENT_AGE,
@@ -84,7 +84,7 @@ class Renderer:
       Log strip   : (185, 680, 1095, 40)   — última mensagem
     """
 
-    TABS = ["Loja", "Upgrades", "Breeding", "Mercado", "Prestígio", "Conquistas", "Histórico", "Inventário", "Guardas", "Gerência"]
+    TABS = ["Loja", "Upgrades", "Breeding", "Mercado", "Prestígio", "Conquistas", "Histórico", "Inventário", "Guardas", "Gerência", "Ranking"]
     OX   = LOG_SIDEBAR_W  # offset x de todos os painéis principais
 
     def __init__(self, screen, game):
@@ -135,6 +135,18 @@ class Renderer:
 
         self._particles: list[list] = []
         self._flash: dict[int, float] = {}
+        
+        # --- NOVO: ESTADO DE LOGIN / CLOUD ---
+        self.state = "login"
+        self.login_user = ""
+        self.login_pass = ""
+        self.login_focus = 0 # 0=user, 1=pass
+        self.login_msg = ""
+        self.login_loading = False
+        self.ranking_data = None
+        self.ranking_loading = False
+        self.selected_tab_old = None # Para voltar do ranking
+
         self.refresh_layout()
 
     def refresh_layout(self):
@@ -306,6 +318,11 @@ class Renderer:
         self.tooltip_slave = None
         mp = self._mouse_pos()
         OX = self.OX
+
+        if self.state == "login":
+            self._draw_login_screen_bg()
+            self._draw_login_form(mp)
+            return
 
         self.screen.fill(DARK_BG)
 
@@ -1403,6 +1420,7 @@ class Renderer:
         elif self.tab == 7: self._tab_inventario(mp, cy)
         elif self.tab == 8: self._tab_guardas(mp, cy)
         elif self.tab == 9: self._tab_gerencia(mp, cy)
+        elif self.tab == 10: self._tab_ranking(mp, cy)
 
     # ABA 0: LOJA
     def _tab_loja(self, mp, cy):
@@ -2994,6 +3012,11 @@ class Renderer:
 
         ev = self._normalize_event(ev)
         mp   = self._mouse_pos()
+
+        if self.state == "login":
+            self._handle_login_events(ev)
+            return
+
         game = self.game
 
         if self.confirm_reset:
@@ -3093,6 +3116,7 @@ class Renderer:
         for i, btn in enumerate(self.tab_btns):
             if btn.clicked(ev):
                 self.tab = i
+                if i == 10: self.ranking_data = None # Forçar recarga
 
         for btn, (acao, param) in reversed(self.dyn_btns):
             if btn.clicked(ev):
@@ -3173,6 +3197,12 @@ class Renderer:
         elif acao == "fechar_detalhe":
             self.slave_detalhe_id = None
             self.detalhe_slot_sel = None
+
+        elif acao == "refresh_ranking":
+            if not self.ranking_loading:
+                self.ranking_loading = True
+                self.game.worker.add_task("ranking", (10,), callback=self._on_ranking_loaded)
+                game.log_add("Atualizando ranking em background...", CYAN)
 
         elif acao == "sel_slot":
             # Toggle seleção de slot
@@ -3490,6 +3520,187 @@ class Renderer:
 # HELPER INTERNO — botão baseado em Rect simples
 # ============================================================
 
+    def _handle_login_events(self, ev):
+        """Trata teclado e cliques na tela de login."""
+        if ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_TAB:
+                self.login_focus = (self.login_focus + 1) % 2
+            elif ev.key == pygame.K_BACKSPACE:
+                if self.login_focus == 0: self.login_user = self.login_user[:-1]
+                else: self.login_pass = self.login_pass[:-1]
+            elif ev.key == pygame.K_RETURN:
+                self._action_login()
+            else:
+                if len(ev.unicode) > 0 and ev.unicode.isprintable():
+                    if self.login_focus == 0: self.login_user += ev.unicode
+                    else: self.login_pass += ev.unicode
+
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            for btn, (act, param) in self.dyn_btns:
+                if btn.clicked(ev):
+                    self._handle_login_action(act)
+
+    def _handle_login_action(self, act):
+        if act == "focus_user": self.login_focus = 0
+        elif act == "focus_pass": self.login_focus = 1
+        elif act == "login": self._action_login()
+        elif act == "register": self._action_register()
+
+    def _action_login(self):
+        if self.login_loading: return
+        self.login_msg = "Conectando..."
+        self.login_loading = True
+        self.game.worker.add_task("login", (self.login_user, self.login_pass), callback=self._on_login_done)
+
+    def _on_login_done(self, result):
+        self.login_loading = False
+        if not result:
+            self.login_msg = "Erro de conexão com o servidor."
+            return
+            
+        succ, msg, pid = result
+        self.login_msg = msg
+        if succ:
+            self.game.player_id = pid
+            self.game.username = self.login_user
+            # Sincroniza estado inicial em background (opcional mas mantemos síncrono aqui por simplicidade no start)
+            online_state = self.game.storage.load_game_state(pid)
+            if online_state:
+                self.game._apply_loaded_state(online_state)
+                self.login_msg = "Sincronizado com a nuvem!"
+            else:
+                self.login_msg = "Iniciando nova jornada online..."
+            
+            self.state = "game"
+            self.show_tutorial = False
+
+    def _action_register(self):
+        if self.login_loading: return
+        self.login_msg = "Registrando..."
+        self.login_loading = True
+        self.game.worker.add_task("register", (self.login_user, self.login_pass), callback=self._on_register_done)
+
+    def _on_register_done(self, result):
+        self.login_loading = False
+        if not result:
+            self.login_msg = "Erro ao registrar (conexão)."
+            return
+        succ, msg = result
+        self.login_msg = msg
+
+    def _draw_login_screen_bg(self):
+        # Fundo temático escuro
+        self.screen.fill((10, 8, 12))
+        # Desenha algumas "pedras" procedurais no fundo para ambiência
+        rng = random.Random(999)
+        for _ in range(40):
+            x, y = rng.randint(0, SCREEN_WIDTH), rng.randint(0, SCREEN_HEIGHT)
+            sz = rng.randint(20, 100)
+            pygame.draw.ellipse(self.screen, (20, 15, 25), (x, y, sz, sz//2))
+
+    def _draw_login_form(self, mp):
+        cw, ch = 360, 420
+        cx, cy = (SCREEN_WIDTH - cw) // 2, (SCREEN_HEIGHT - ch) // 2
+        
+        # Painel central
+        pygame.draw.rect(self.screen, PANEL_BG, (cx, cy, cw, ch), border_radius=12)
+        pygame.draw.rect(self.screen, PANEL_BDR, (cx, cy, cw, ch), 2, border_radius=12)
+        
+        # Título
+        title_surf = self.f_big.render("MINA DOS ESCRAVOS", True, GOLD)
+        self.screen.blit(title_surf, (cx + (cw - title_surf.get_width())//2, cy + 30))
+        sub_surf = self.f_small.render("Acesso ao Cofre Real", True, GRAY)
+        self.screen.blit(sub_surf, (cx + (cw - sub_surf.get_width())//2, cy + 60))
+
+        # Inputs
+        curr_y = cy + 110
+        for i, (label, val) in enumerate([("Usuário", self.login_user), ("Senha", "*" * len(self.login_pass))]):
+            # Label
+            self.screen.blit(self.f_normal.render(label, True, LIGHT_BROWN), (cx + 40, curr_y))
+            curr_y += 22
+            
+            # Box
+            box_rect = pygame.Rect(cx + 40, curr_y, cw - 80, 36)
+            is_focused = (self.login_focus == i)
+            cor_box = (40, 40, 60) if is_focused else (25, 25, 35)
+            pygame.draw.rect(self.screen, cor_box, box_rect, border_radius=6)
+            pygame.draw.rect(self.screen, GOLD if is_focused else PANEL_BDR, box_rect, 1, border_radius=6)
+            
+            txt_surf = self.f_normal.render(val + ("|" if is_focused and (pygame.time.get_ticks() // 500) % 2 == 0 else ""), True, WHITE)
+            self.screen.blit(txt_surf, (box_rect.x + 10, box_rect.y + (box_rect.h - txt_surf.get_height())//2))
+            
+            # Botão invisível para foco
+            self.dyn_btns.append((_RectBtn(box_rect), ("focus_user" if i == 0 else "focus_pass", None)))
+            curr_y += 55
+
+        # Mensagem de Erro/Status
+        if self.login_msg:
+            msg_surf = self.f_small.render(self.login_msg, True, RED if "Erro" in self.login_msg or "incorreta" in self.login_msg else ORANGE)
+            self.screen.blit(msg_surf, (cx + (cw - msg_surf.get_width())//2, curr_y))
+        
+        # Botões
+        curr_y += 35
+        btn_login = Btn(cx + 40, curr_y, cw - 80, 44, "ENTRAR", cor=DARK_GREEN)
+        btn_login.update(mp); btn_login.draw(self.screen, self.f_title)
+        self.dyn_btns.append((btn_login, ("login", None)))
+        
+        curr_y += 60
+        btn_reg = Btn(cx + 80, curr_y, cw - 160, 32, "Registrar Novo", cor=MED_BROWN)
+        btn_reg.update(mp); btn_reg.draw(self.screen, self.f_normal)
+        self.dyn_btns.append((btn_reg, ("register", None)))
+
+        curr_y += 50
+        hint = self.f_tiny.render("Salva e sincroniza automaticamente na nuvem.", True, DARK_GRAY)
+        self.screen.blit(hint, (cx + (cw - hint.get_width())//2, curr_y))
+
+    def _on_ranking_loaded(self, data):
+        self.ranking_data = data
+        self.ranking_loading = False
+
+    def _tab_ranking(self, mp, cy):
+        """Aba especial para mostrar o Cloud Ranking."""
+        if not self.ranking_data and not self.ranking_loading:
+            self.ranking_loading = True
+            # Busca em background
+            self.game.worker.add_task("ranking", (10,), callback=self._on_ranking_loaded)
+        
+        OX = self.OX
+        tx, ty = OX + 20, cy + 10
+        
+        self.screen.blit(self.f_title.render("Ranking Global dos Magnatas", True, GOLD), (tx, ty))
+        
+        if self.ranking_loading:
+            self.screen.blit(self.f_normal.render("Sincronizando com a Nuvem...", True, GRAY), (tx, ty + 40))
+            return
+
+        ty += 30
+        
+        # Colunas: Top Dinheiro | Top Tempo
+        col_w = (SCREEN_WIDTH - OX) // 2 - 20
+        
+        def draw_list(title, items, start_x, start_y, is_money=True):
+            self.screen.blit(self.f_normal.render(title, True, SILVER if not is_money else GOLD), (start_x, start_y))
+            start_y += 22
+            for i, (uname, val) in enumerate(items):
+                color = WHITE if i > 2 else (GOLD if i == 0 else (SILVER if i == 1 else (205, 127, 50)))
+                pref = f"{i+1}. "
+                name_surf = self.f_small.render(f"{pref}{uname}", True, color)
+                self.screen.blit(name_surf, (start_x, start_y))
+                
+                val_str = f"${val:,.0f}" if is_money else f"{val/3600:.1f}h"
+                val_surf = self.f_small.render(val_str, True, color)
+                self.screen.blit(val_surf, (start_x + 140, start_y))
+                start_y += 18
+
+        if self.ranking_data:
+            draw_list("Mais Ricos", self.ranking_data["money"][:6], tx, ty, True)
+            draw_list("Mais Veteranos", self.ranking_data["time"][:6], tx + col_w, ty, False)
+
+        # Botão de atualizar
+        btn_refresh = Btn(tx, cy + BOTTOM_H - 120, 150, 24, "Atualizar Ranking", cor=BLUE)
+        btn_refresh.update(mp); btn_refresh.draw(self.screen, self.f_small)
+        self.dyn_btns.append((btn_refresh, ("refresh_ranking", None)))
+
     def _wrap_text(self, text: str, max_w: int) -> list[str]:
         """Quebra um texto em várias linhas que cabem em max_w pixels."""
         words = text.split(' ')
@@ -3504,6 +3715,14 @@ class Renderer:
                 curr_line = word + " "
         lines.append(curr_line.strip())
         return [l for l in lines if l]
+
+    def save_screenshot(self, filename: str):
+        """Salva a superfície de renderização atual como uma imagem PNG."""
+        try:
+            pygame.image.save(self.screen, filename)
+            self.game.log_add(f"[SISTEMA] Captura salva: {filename}", (0, 255, 255))
+        except Exception as e:
+            self.game.log_add(f"[ERRO] Falha ao capturar tela: {e}", (255, 0, 0))
 
 class _RectBtn:
     """Rect-like mínimo que satisfaz a interface de Btn para dyn_btns."""

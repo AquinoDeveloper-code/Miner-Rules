@@ -115,23 +115,24 @@ def main():
             break
 
         # --- Atualização da lógica do jogo ---
-        if not game.pausado:
+        if not game.pausado and renderer.state == "game":
             game.update(delta_game, now_real)
 
         # --- Detecta novos ciclos de mineração (para efeitos visuais) ---
-        for e in game.escravos_vivos:
-            prev = _last_ciclos.get(e.id, -999)
-            if e.ultimo_ciclo != prev and e.ultimo_ciclo > 0:
-                _last_ciclos[e.id] = e.ultimo_ciclo
-                # Pega cor do recurso mais recente (usa cor do ouro como default visual)
-                cor = (220, 200, 60)
-                renderer.notify_mining(e.id, cor)
+        if renderer.state == "game":
+            for e in game.escravos_vivos:
+                prev = _last_ciclos.get(e.id, -999)
+                if e.ultimo_ciclo != prev and e.ultimo_ciclo > 0:
+                    _last_ciclos[e.id] = e.ultimo_ciclo
+                    # Pega cor do recurso mais recente (usa cor do ouro como default visual)
+                    cor = (220, 200, 60)
+                    renderer.notify_mining(e.id, cor)
 
-        # Limpa escravos mortos do tracking
-        ids_vivos = {e.id for e in game.escravos}
-        for eid in list(_last_ciclos.keys()):
-            if eid not in ids_vivos:
-                del _last_ciclos[eid]
+            # Limpa escravos mortos do tracking
+            ids_vivos = {e.id for e in game.escravos}
+            for eid in list(_last_ciclos.keys()):
+                if eid not in ids_vivos:
+                    del _last_ciclos[eid]
 
         # --- Renderização ---
         renderer.draw()

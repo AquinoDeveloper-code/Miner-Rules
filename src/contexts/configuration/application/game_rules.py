@@ -24,7 +24,7 @@ from src.contexts.shared.constants import (
 
 
 DEFAULT_RULES = {
-    "initial_gold": 250.0,
+    "initial_gold": 1000.0,
     "shop_refresh_base_cost": 50.0,
     "mining_interval": MINING_INTERVAL,
     "breeding_interval": BREEDING_INTERVAL,

@@ -16,7 +16,8 @@ from src.contexts.configuration.infrastructure.app_paths import (
 from src.contexts.gameplay.domain.slave import Escravo
 from src.contexts.gameplay.domain.guard import Delivery, Guarda
 from src.contexts.gameplay.domain.manager import Gerente
-from src.contexts.gameplay.infrastructure.sqlite_storage import SQLiteStorage
+from src.contexts.gameplay.infrastructure.postgres_storage import PostgresStorage
+from src.contexts.gameplay.infrastructure.db_worker import DBWorker
 from src.contexts.shared.constants import (
     RESOURCES, RESOURCE_ORDER, MINE_UPGRADES, UPGRADE_ORDER,
     MINE_DEPTHS, RANDOM_EVENTS, ACHIEVEMENTS,
@@ -41,7 +42,10 @@ class GameManager:
     SAVE_FILE = get_save_path()
 
     def __init__(self):
-        self.storage = SQLiteStorage(get_save_path())
+        self.storage = PostgresStorage()
+        self.worker  = DBWorker(self.storage)
+        self.player_id = None
+        self.username = None
         self.rules = load_rules()
         self._init_state()
 
@@ -380,8 +384,8 @@ class GameManager:
         # Autosave (tempo real)
         if agora_real - self._t_autosave >= self.rules["autosave_interval"]:
             self._t_autosave = agora_real
-            self.save()
-            self.log_add("[SISTEMA] Progresso salvo automaticamente.", GRAY)
+            self.save_async() # <--- Agora assíncrono
+            self.log_add("[SISTEMA] Sincronização em nuvem iniciada...", GRAY)
 
         # Atualiza estatísticas
         n = len(self.escravos_vivos)
@@ -1789,13 +1793,13 @@ class GameManager:
         return True, f"Prestígio #{self.prestigios} realizado!"
 
     def reset_progress(self):
-        delete_save_files()
-        self.storage.close()
-        self.storage = SQLiteStorage(get_save_path())
+        if self.player_id:
+            self.storage.clear_game_state(self.player_id)
+        
         self.rules = load_rules()
         Escravo._id_counter = 0
         self._init_state()
-        self.log_add("[SISTEMA] Progresso resetado.", ORANGE)
+        self.log_add("[SISTEMA] Progresso resetado (Nuvem limpa).", ORANGE)
         self.save()
         return True, "Progresso resetado."
 
@@ -2051,29 +2055,59 @@ class GameManager:
         self._sanitizar_inventario()
 
     def save(self):
+        """Versão bloqueante para salvamentos críticos (ex: ao fechar o jogo)."""
         try:
-            return self.storage.save_game_state(self._serialize_state())
+            if not self.player_id:
+                return False
+            return self.storage.save_game_state(
+                self.player_id,
+                self._serialize_state(),
+                self.stats.get("ouro_total", 0.0),
+                self.tempo_jogo
+            )
         except Exception as ex:
             print(f"Erro ao salvar: {ex}")
             return False
 
+    def save_async(self):
+        """Versão assíncrona para não travar o FPS durante o jogo."""
+        try:
+            if not self.player_id:
+                return False
+            
+            # Snapshots instantâneos para evitar inconsistências durante o upload
+            state_data = self._serialize_state()
+            money = float(self.stats.get("ouro_total", 0.0))
+            time_played = float(self.tempo_jogo)
+            
+            self.worker.add_task("save", (self.player_id, state_data, money, time_played))
+            return True
+        except Exception as ex:
+            print(f"Erro ao agendar save: {ex}")
+            return False
+
     def load(self):
         try:
-            data = self.storage.load_game_state()
+            if not self.player_id:
+                return False
+            data = self.storage.load_game_state(self.player_id)
             if data is None:
                 for legacy_path in iter_legacy_save_paths():
                     if not legacy_path.exists():
                         continue
                     with legacy_path.open("r", encoding="utf-8") as f:
                         data = json.load(f)
-                    self.storage.save_game_state(data, action="legacy_import")
+                    # Já faz o upload do save antigo pra nuvem
+                    if data:
+                        self._apply_loaded_state(data)
+                        self.save()
                     break
 
             if data is None:
                 return False
 
             self._apply_loaded_state(data)
-            self.log_add("Jogo carregado com sucesso!", GREEN)
+            self.log_add("Jogo carregado com sucesso da nuvem!", GREEN)
             return True
         except Exception as ex:
             print(f"Erro ao carregar: {ex}")

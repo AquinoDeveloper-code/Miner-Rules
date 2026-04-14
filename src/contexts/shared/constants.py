@@ -58,6 +58,7 @@ ORANGE      = (230, 130, 35)
 PURPLE      = (160, 85,  215)
 CYAN        = (55,  210, 210)
 GOLD        = (255, 215, 0)
+SILVER      = (192, 192, 192)
 PINK        = (240, 130, 175)
 
 # Raridade → cor de destaque
